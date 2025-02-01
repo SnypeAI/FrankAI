@@ -4,6 +4,9 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Mic, MicOff, Menu, X, MessageSquare, Bug, Play, RefreshCw, Wand2, Volume2, Settings2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { createPortal } from 'react-dom';
+import DebugPanel from './DebugPanel';
+import SettingsPanel from './SettingsPanel';
+import ConversationHistory from './ConversationHistory';
 
 interface ChatMessage {
   id: number;
@@ -34,11 +37,56 @@ interface DebugState {
   isRecordingTest: boolean;
 }
 
+interface Settings {
+  elevenlabs_api_key: string | null;
+  elevenlabs_voice_id: string | null;
+  llm_api_endpoint: string;
+  llm_model: string;
+  llm_temperature: number;
+  llm_max_tokens: number;
+}
+
+interface ModelFilters {
+  showUncensored: boolean;
+  modelFamily: string;
+  sizeRange: string;
+  sortBy: 'name' | 'size';
+  sortDirection: 'asc' | 'desc';
+}
+
+interface LLMModel {
+  id: string;
+  name?: string;
+  object: string;
+  owned_by: string;
+  size?: number;  // Size in billions of parameters
+  family?: string;
+}
+
+interface SavedConfig {
+  id: number;
+  name: string;
+  endpoint: string;
+  model: string;
+  temperature: string;
+  max_tokens: string;
+  created_at: string;
+}
+
 const VoiceAssistant: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversation, setCurrentConversation] = useState<number | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
+  const [settings, setSettings] = useState<Settings>({
+    elevenlabs_api_key: null,
+    elevenlabs_voice_id: null,
+    llm_api_endpoint: '',
+    llm_model: '',
+    llm_temperature: 0.7,
+    llm_max_tokens: 1000
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [audioState, setAudioState] = useState<AudioState>({
     isListening: false,
@@ -56,6 +104,8 @@ const VoiceAssistant: React.FC = () => {
     debugStatus: '',
     isRecordingTest: false
   });
+  const [availableModels, setAvailableModels] = useState<LLMModel[]>([]);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
 
   const audioContext = useRef<AudioContext | null>(null);
   const audioStream = useRef<MediaStream | null>(null);
@@ -74,6 +124,60 @@ const VoiceAssistant: React.FC = () => {
 
   const debugAudioProcessor = useRef<AudioWorkletNode | null>(null);
   const debugAudioStream = useRef<MediaStream | null>(null);
+
+  // Add new state for active settings
+  const [showSettingsChips, setShowSettingsChips] = useState(true);
+
+  // Add state for saved configs
+  const [savedConfigs, setSavedConfigs] = useState<SavedConfig[]>([]);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [localConfigName, setLocalConfigName] = useState('');
+  const [isTestingConfig, setIsTestingConfig] = useState(false);
+  const [showSavedConfigs, setShowSavedConfigs] = useState(true);
+
+  // Add helper functions at component level
+  const getChipColor = (key: string) => {
+    switch (key) {
+      case 'llm_api_endpoint':
+        return 'from-blue-500 to-blue-600';
+      case 'llm_model':
+        return 'from-purple-500 to-purple-600';
+      case 'llm_temperature':
+        return 'from-green-500 to-green-600';
+      case 'llm_max_tokens':
+        return 'from-yellow-500 to-yellow-600';
+      case 'elevenlabs_api_key':
+        return 'from-red-500 to-red-600';
+      case 'elevenlabs_voice_id':
+        return 'from-orange-500 to-orange-600';
+      default:
+        return 'from-gray-500 to-gray-600';
+    }
+  };
+
+  const getReadableName = (key: string) => {
+    const names: Record<string, string> = {
+      llm_api_endpoint: 'API Endpoint',
+      llm_model: 'Model',
+      llm_temperature: 'Temperature',
+      llm_max_tokens: 'Max Tokens',
+      elevenlabs_api_key: 'ElevenLabs Key',
+      elevenlabs_voice_id: 'Voice ID'
+    };
+    return names[key] || key;
+  };
+
+  const getDisplayValue = (key: string, value: string) => {
+    if (key === 'elevenlabs_api_key' && value) {
+      return value.slice(0, 4) + '...' + value.slice(-4);
+    }
+    return value;
+  };
+
+  const handleRemoveSetting = async (key: string) => {
+    await updateSetting(key, '');
+    setSettings(prev => ({ ...prev, [key]: '' }));
+  };
 
   const playAudioResponse = async (audioData: Uint8Array) => {
     try {
@@ -129,16 +233,13 @@ const VoiceAssistant: React.FC = () => {
 
   const connectWebSocket = useCallback(function initWebSocket() {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log('WebSocket already connected');
       return;
     }
 
+    // Reset connection attempts if manually reconnecting
     if (connectionAttempts.current >= MAX_RECONNECT_ATTEMPTS) {
-      setAudioState(prev => ({
-        ...prev,
-        error: 'Maximum reconnection attempts reached. Please reload the page.',
-        wsConnected: false
-      }));
-      return;
+      connectionAttempts.current = 0;
     }
 
     try {
@@ -165,7 +266,8 @@ const VoiceAssistant: React.FC = () => {
           error: event.reason ? `Connection closed: ${event.reason}` : 'Connection closed'
         }));
 
-        if (connectionAttempts.current < MAX_RECONNECT_ATTEMPTS) {
+        // Only attempt to reconnect if not manually closed
+        if (event.code !== 1000 && connectionAttempts.current < MAX_RECONNECT_ATTEMPTS) {
           console.log(`Attempting to reconnect (${connectionAttempts.current + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
           wsReconnectTimeout.current = setTimeout(initWebSocket, 2000);
         }
@@ -333,19 +435,35 @@ const VoiceAssistant: React.FC = () => {
     }
   }, [streamText, isDebugPanelOpen]);
 
+  // Add cleanup function for WebSocket
+  const cleanupWebSocket = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close(1000, 'Cleanup'); // Use code 1000 for normal closure
+      wsRef.current = null;
+    }
+    if (wsReconnectTimeout.current) {
+      clearTimeout(wsReconnectTimeout.current);
+    }
+  }, []);
+
+  // Update the useEffect for WebSocket connection
   useEffect(() => {
     connectWebSocket();
     return () => {
-      connectionAttempts.current = MAX_RECONNECT_ATTEMPTS;
-      if (wsReconnectTimeout.current) {
-        clearTimeout(wsReconnectTimeout.current);
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      cleanupWebSocket();
     };
-  }, [connectWebSocket]);
+  }, [connectWebSocket, cleanupWebSocket]);
+
+  // Add handler for manual reconnection
+  const handleReconnectWebSocket = useCallback(() => {
+    cleanupWebSocket();
+    connectionAttempts.current = 0; // Reset connection attempts
+    connectWebSocket();
+  }, [cleanupWebSocket, connectWebSocket]);
+
+  const isError = (error: unknown): error is Error => {
+    return error instanceof Error;
+  };
 
   const initializeAudio = async () => {
     try {
@@ -390,9 +508,10 @@ const VoiceAssistant: React.FC = () => {
       return true;
     } catch (error) {
       console.error('Error initializing audio:', error);
+      const errorMessage = isError(error) ? error.message : 'Unknown error occurred';
       setAudioState(prev => ({ 
         ...prev, 
-        error: 'Failed to initialize audio: ' + error.message,
+        error: 'Failed to initialize audio: ' + errorMessage,
         isInitialized: false 
       }));
       return false;
@@ -419,9 +538,10 @@ const VoiceAssistant: React.FC = () => {
       }
     } catch (error) {
       console.error('Failed to start recording:', error);
+      const errorMessage = isError(error) ? error.message : 'Unknown error occurred';
       setAudioState(prev => ({ 
         ...prev, 
-        error: 'Failed to start recording: ' + error.message,
+        error: 'Failed to start recording: ' + errorMessage,
         isListening: false 
       }));
     }
@@ -440,9 +560,10 @@ const VoiceAssistant: React.FC = () => {
       }
     } catch (error) {
       console.error('Failed to stop recording:', error);
+      const errorMessage = isError(error) ? error.message : 'Unknown error occurred';
       setAudioState(prev => ({ 
         ...prev, 
-        error: 'Failed to stop recording: ' + error.message,
+        error: 'Failed to stop recording: ' + errorMessage,
         isListening: false 
       }));
     }
@@ -512,6 +633,93 @@ const VoiceAssistant: React.FC = () => {
     };
   }, []);
 
+  // Load settings on component mount
+  useEffect(() => {
+    const loadSettings = async () => {
+      let retryCount = 0;
+      const maxRetries = 3;
+      const retryDelay = 2000; // 2 seconds
+
+      const tryLoadSettings = async () => {
+        try {
+          const response = await fetch('http://localhost:3001/settings');
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          const data = await response.json();
+          setSettings(data);
+
+          // Check if required settings are missing
+          if (!data.llm_api_endpoint || !data.llm_model) {
+            setIsSettingsPanelOpen(true);
+            setStatus('Please configure required LLM settings to continue');
+          }
+        } catch (error) {
+          console.error('Failed to load settings:', error);
+          if (retryCount < maxRetries) {
+            retryCount++;
+            setStatus(`Retrying to connect to server... (${retryCount}/${maxRetries})`);
+            setTimeout(tryLoadSettings, retryDelay);
+          } else {
+            setIsSettingsPanelOpen(true);
+            setStatus('Failed to connect to server. Please check if the server is running.');
+          }
+        }
+      };
+
+      await tryLoadSettings();
+    };
+
+    loadSettings();
+  }, []);
+
+  // Function to fetch available models
+  const fetchModels = async (endpoint: string) => {
+    setIsLoadingModels(true);
+    try {
+      const response = await fetch(`${endpoint}/v1/models`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      setAvailableModels(data.data || []);
+      return data.data || [];
+    } catch (error) {
+      console.error('Failed to fetch models:', error);
+      setStatus('Failed to fetch available models');
+      return [];
+    } finally {
+      setIsLoadingModels(false);
+    }
+  };
+
+  // Update the updateSetting function to remove automatic model fetching
+  const updateSetting = async (key: string, value: string) => {
+    try {
+      const response = await fetch('http://localhost:3001/settings', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ key, value }),
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      setSettings(prev => ({ ...prev, [key]: value }));
+    } catch (error) {
+      console.error('Failed to update setting:', error);
+      setStatus('Failed to save setting. Please try again.');
+    }
+  };
+
+  // Check if settings are properly configured
+  const areSettingsConfigured = useCallback(() => {
+    return !!(settings.llm_api_endpoint && settings.llm_model);
+  }, [settings.llm_api_endpoint, settings.llm_model]);
+
   const testMicrophoneRecording = async () => {
     try {
       setDebugState(prev => ({ ...prev, debugStatus: 'Testing microphone recording...' }));
@@ -575,7 +783,11 @@ const VoiceAssistant: React.FC = () => {
 
       } catch (error) {
         console.error('Error stopping test recording:', error);
-        setDebugState(prev => ({ ...prev, debugStatus: 'Failed to stop recording: ' + error.message }));
+        const errorMessage = isError(error) ? error.message : 'Unknown error occurred';
+        setDebugState(prev => ({ 
+          ...prev, 
+          debugStatus: 'Failed to stop recording: ' + errorMessage 
+        }));
       }
     } else {
       // Start recording
@@ -638,7 +850,11 @@ const VoiceAssistant: React.FC = () => {
 
       } catch (error) {
         console.error('Error starting test recording:', error);
-        setDebugState(prev => ({ ...prev, debugStatus: 'Failed to start recording: ' + error.message }));
+        const errorMessage = isError(error) ? error.message : 'Unknown error occurred';
+        setDebugState(prev => ({ 
+          ...prev, 
+          debugStatus: 'Failed to start recording: ' + errorMessage 
+        }));
       }
     }
   };
@@ -675,239 +891,77 @@ const VoiceAssistant: React.FC = () => {
     }
   };
 
-  const ThinkingIndicator = () => (
-    <div className="flex items-center space-x-2 p-4 bg-[#1E1E1E] rounded-2xl rounded-bl-none shadow-lg">
-      <div className="flex space-x-1">
-        <motion.div
-          animate={{ scale: [1, 1.2, 1] }}
-          transition={{ repeat: Infinity, duration: 1, repeatDelay: 0.2 }}
-          className="w-2 h-2 bg-blue-400/50 rounded-full"
-        />
-        <motion.div
-          animate={{ scale: [1, 1.2, 1] }}
-          transition={{ repeat: Infinity, duration: 1, delay: 0.2, repeatDelay: 0.2 }}
-          className="w-2 h-2 bg-blue-400/50 rounded-full"
-        />
-        <motion.div
-          animate={{ scale: [1, 1.2, 1] }}
-          transition={{ repeat: Infinity, duration: 1, delay: 0.4, repeatDelay: 0.2 }}
-          className="w-2 h-2 bg-blue-400/50 rounded-full inline-block"
-        />
-      </div>
-    </div>
-  );
+  // Add this function back for the SettingsPanel
+  const handleSaveConfig = async (name: string) => {
+    if (!name) {
+      setStatus('Please enter a name for this configuration');
+      return;
+    }
 
-  const DebugModal = () => {
-    // Only render the modal content when it's open
-    if (!isDebugPanelOpen) return null;
+    setIsSavingConfig(true);
+    setIsTestingConfig(true);
 
-    const modalContent = (
-      <>
-        <div
-          className="fixed inset-0 bg-black bg-opacity-50"
-          onClick={() => setIsDebugPanelOpen(false)}
-        />
-        <div
-          className="fixed inset-x-0 bottom-0 p-6 bg-[#1A1A1A] border-t border-white/5 rounded-t-2xl shadow-2xl"
-        >
-          <div className="max-w-2xl mx-auto">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-semibold text-white">Debug Panel</h2>
-              <button
-                onClick={() => setIsDebugPanelOpen(false)}
-                className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-              >
-                <X className="w-5 h-5 text-white/70" />
-              </button>
-            </div>
+    try {
+      // Test the connection first
+      const response = await fetch(settings.llm_api_endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: settings.llm_model,
+          messages: [{ role: 'user', content: 'Test' }],
+          temperature: settings.llm_temperature || 0.7,
+          max_tokens: settings.llm_max_tokens || 1000
+        }),
+      });
 
-            <div className="grid grid-cols-2 gap-4">
-              {/* Audio System Tests */}
-              <div className="space-y-4 p-4 bg-white/5 rounded-xl">
-                <h3 className="text-sm font-medium text-white/70">Audio System</h3>
-                <div className="space-y-2">
-                  <button
-                    onClick={testMicrophoneRecording}
-                    className="w-full p-3 flex items-center justify-center space-x-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg transition-colors"
-                  >
-                    <Mic className="w-4 h-4" />
-                    <span>Test Recording (3s)</span>
-                  </button>
-                  <button
-                    onClick={() => debugState.recordedAudio && playAudioResponse(debugState.recordedAudio)}
-                    disabled={!debugState.recordedAudio}
-                    className="w-full p-3 flex items-center justify-center space-x-2 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <Play className="w-4 h-4" />
-                    <span>Play Last Recording</span>
-                  </button>
-                </div>
-              </div>
+      if (!response.ok) {
+        setStatus('Failed to test connection to LLM');
+        setIsSavingConfig(false);
+        setIsTestingConfig(false);
+        return;
+      }
 
-              {/* Connection Tests */}
-              <div className="space-y-4 p-4 bg-white/5 rounded-xl">
-                <h3 className="text-sm font-medium text-white/70">Connection</h3>
-                <div className="space-y-2">
-                  <button
-                    onClick={connectWebSocket}
-                    className="w-full p-3 flex items-center justify-center space-x-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 rounded-lg transition-colors"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                    <span>Reconnect WebSocket</span>
-                  </button>
-                  <div className="p-2 bg-white/5 rounded-lg">
-                    <p className="text-xs text-white/50">
-                      Status: {audioState.wsConnected ? 'Connected' : 'Disconnected'}
-                    </p>
-                  </div>
-                </div>
-              </div>
+      setIsTestingConfig(false);
 
-              {/* AI Tests */}
-              <div className="space-y-4 p-4 bg-white/5 rounded-xl">
-                <h3 className="text-sm font-medium text-white/70">AI System</h3>
-                <div className="space-y-2">
-                  <button
-                    onClick={testTranscription}
-                    className="w-full p-3 flex items-center justify-center space-x-2 bg-yellow-600/20 hover:bg-yellow-600/30 text-yellow-400 rounded-lg transition-colors"
-                  >
-                    <Settings2 className="w-4 h-4" />
-                    <span>
-                      {debugState.isRecordingTest ? 'Stop Recording' : 'Test Transcription'}
-                    </span>
-                  </button>
-                  <button
-                    onClick={testLLMConnection}
-                    className="w-full p-3 flex items-center justify-center space-x-2 bg-orange-600/20 hover:bg-orange-600/30 text-orange-400 rounded-lg transition-colors"
-                  >
-                    <Wand2 className="w-4 h-4" />
-                    <span>Test LLM</span>
-                  </button>
-                </div>
-              </div>
+      // Save the config
+      const response2 = await fetch('http://localhost:3001/saved-configs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name,
+          endpoint: settings.llm_api_endpoint,
+          model: settings.llm_model,
+          temperature: settings.llm_temperature?.toString() || '0.7',
+          max_tokens: settings.llm_max_tokens?.toString() || '1000'
+        }),
+      });
 
-              {/* TTS Tests */}
-              <div className="space-y-4 p-4 bg-white/5 rounded-xl">
-                <h3 className="text-sm font-medium text-white/70">Text to Speech</h3>
-                <div className="space-y-2">
-                  <button
-                    onClick={testTTSConnection}
-                    className="w-full p-3 flex items-center justify-center space-x-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-lg transition-colors"
-                  >
-                    <Volume2 className="w-4 h-4" />
-                    <span>Test TTS</span>
-                  </button>
-                </div>
-              </div>
-            </div>
+      if (!response2.ok) {
+        throw new Error(`HTTP error! status: ${response2.status}`);
+      }
 
-            {/* Status Display */}
-            <div className="mt-6 p-4 bg-white/5 rounded-xl">
-              <h3 className="text-sm font-medium text-white/70 mb-2">Debug Log</h3>
-              <div className="space-y-1">
-                {debugState.lastTranscription && (
-                  <p className="text-xs text-white/50">Last Transcription: {debugState.lastTranscription}</p>
-                )}
-                {debugState.lastLLMResponse && (
-                  <p className="text-xs text-white/50">Last LLM Response: {debugState.lastLLMResponse}</p>
-                )}
-                {debugState.debugStatus && (
-                  <p className="text-xs text-white/50">Status: {debugState.debugStatus}</p>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      </>
-    );
-
-    // Use createPortal to render the modal outside the main component tree
-    return createPortal(modalContent, document.body);
+      const savedConfig = await response2.json();
+      setSavedConfigs(prev => [savedConfig, ...prev].slice(0, 10));
+      setStatus('Configuration saved successfully');
+    } catch (error) {
+      setStatus('Error saving configuration');
+      console.error('Error:', error);
+    } finally {
+      setIsSavingConfig(false);
+      setIsTestingConfig(false);
+    }
   };
 
   return (
     <motion.div 
       initial={{ opacity: 0 }} 
       animate={{ opacity: 1 }} 
-      className="h-screen w-full bg-[#0A0A0A] flex"
+      className="h-screen w-full bg-[#0A0A0A] flex flex-col"
     >
-      {/* Sidebar */}
-      <AnimatePresence>
-        {isSidebarOpen && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 0.5 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black"
-              onClick={() => setIsSidebarOpen(false)}
-            />
-            <motion.div 
-              initial={{ x: '-100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '-100%' }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="fixed inset-y-0 left-0 w-80 bg-[#1A1A1A] border-r border-white/5 shadow-2xl z-50"
-            >
-              <div className="flex items-center justify-between p-6">
-                <motion.h2 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="text-xl font-semibold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent"
-                >
-                  Conversation History
-                </motion.h2>
-                <motion.button
-                  whileHover={{ scale: 1.1 }}
-                  whileTap={{ scale: 0.95 }}
-                  onClick={() => setIsSidebarOpen(false)}
-                  className="p-2 rounded-lg hover:bg-white/10 transition-colors"
-                >
-                  <X className="w-5 h-5 text-white/70" />
-                </motion.button>
-              </div>
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.1 }}
-                className="overflow-y-auto h-full py-4 space-y-2 px-4"
-              >
-                {conversations.map((conv, index) => (
-                  <motion.button
-                    key={conv.id}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: index * 0.05 }}
-                    onClick={() => {
-                      setCurrentConversation(conv.id);
-                      setIsSidebarOpen(false);
-                    }}
-                    className={`w-full p-4 flex items-center space-x-3 rounded-xl transition-all ${
-                      currentConversation === conv.id 
-                        ? 'bg-white/15 shadow-lg' 
-                        : 'hover:bg-white/10'
-                    }`}
-                  >
-                    <MessageSquare className="w-5 h-5 text-blue-400" />
-                    <div className="flex-1 text-left">
-                      <p className="text-sm font-medium text-white/90 truncate">
-                        {conv.title}
-                      </p>
-                      <p className="text-xs text-white/50">
-                        {new Date(conv.updatedAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                  </motion.button>
-                ))}
-              </motion.div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-
-      {/* Render DebugModal outside AnimatePresence */}
-      <DebugModal />
-
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
         {/* Messages Container */}
@@ -947,36 +1001,6 @@ const VoiceAssistant: React.FC = () => {
               </motion.div>
             ))}
           </AnimatePresence>
-          <AnimatePresence>
-            {status === 'Generating response...' && messages.length > 0 && !messages[messages.length - 1].isStreaming && (
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -20 }}
-                className="flex justify-start"
-              >
-                <div className="p-4 bg-[#1E1E1E] rounded-2xl rounded-bl-none shadow-lg">
-                  <div className="flex space-x-2">
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{ duration: 1, repeat: Infinity }}
-                      className="w-2 h-2 bg-blue-400/50 rounded-full"
-                    />
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{ duration: 1, delay: 0.2, repeat: Infinity }}
-                      className="w-2 h-2 bg-blue-400/50 rounded-full"
-                    />
-                    <motion.span
-                      animate={{ opacity: [0.4, 1, 0.4] }}
-                      transition={{ duration: 1, delay: 0.4, repeat: Infinity }}
-                      className="w-2 h-2 bg-blue-400/50 rounded-full"
-                    />
-                  </div>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
           <div ref={messagesEndRef} />
         </motion.div>
 
@@ -989,7 +1013,7 @@ const VoiceAssistant: React.FC = () => {
             <AnimatePresence mode="wait">
               {(status || audioState.error || (!audioState.wsConnected && !audioState.error)) && (
                 <motion.div 
-                  key={status || 'error'} // Force remount on status change
+                  key={status || 'error'}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
@@ -1012,9 +1036,9 @@ const VoiceAssistant: React.FC = () => {
         {/* Footer Controls */}
         <motion.div 
           layout
-          className="px-6 py-4 bg-[#1A1A1A] border-t border-white/5"
+          className="w-full bg-[#1A1A1A] border-t border-white/5"
         >
-          <div className="max-w-screen-sm mx-auto flex justify-between items-center">
+          <div className="max-w-screen-sm mx-auto flex justify-between items-center px-6 py-4">
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
@@ -1028,9 +1052,9 @@ const VoiceAssistant: React.FC = () => {
               whileHover={{ scale: 1.1 }}
               whileTap={{ scale: 0.9 }}
               onClick={audioState.isListening ? stopRecording : startRecording}
-              disabled={!audioState.isInitialized || processingRef.current || !audioState.wsConnected}
+              disabled={!audioState.isInitialized || processingRef.current || !audioState.wsConnected || !areSettingsConfigured()}
               className={`p-6 rounded-2xl transition-all duration-300 shadow-lg ${
-                !audioState.isInitialized || !audioState.wsConnected
+                !audioState.isInitialized || !audioState.wsConnected || !areSettingsConfigured()
                   ? 'bg-neutral-800 cursor-not-allowed'
                   : audioState.isListening
                   ? 'bg-red-600 hover:bg-red-700'
@@ -1038,7 +1062,7 @@ const VoiceAssistant: React.FC = () => {
               }`}
             >
               <motion.div
-                animate={audioState.isListening ? { scale: [1, 1.2, 1] } : {}}
+                animate={{ scale: audioState.isListening ? [1, 1.2, 1] : 1 }}
                 transition={{ repeat: Infinity, duration: 2 }}
               >
                 {audioState.isListening ? (
@@ -1049,17 +1073,76 @@ const VoiceAssistant: React.FC = () => {
               </motion.div>
             </motion.button>
 
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => setIsDebugPanelOpen(true)}
-              className="p-3 rounded-xl hover:bg-white/5 transition-colors"
-            >
-              <Bug className="w-6 h-6 text-white/70" />
-            </motion.button>
+            <div className="flex space-x-2">
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setIsSettingsPanelOpen(true)}
+                className="p-3 rounded-xl hover:bg-white/5 transition-colors"
+              >
+                <Settings2 className="w-6 h-6 text-white/70" />
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setIsDebugPanelOpen(true)}
+                className="p-3 rounded-xl hover:bg-white/5 transition-colors"
+              >
+                <Bug className="w-6 h-6 text-white/70" />
+              </motion.button>
+            </div>
           </div>
         </motion.div>
       </div>
+
+      {/* Panels */}
+      <AnimatePresence mode="wait">
+        {isSidebarOpen && (
+          <ConversationHistory
+            key="conversation-history"
+            isOpen={isSidebarOpen}
+            onClose={() => setIsSidebarOpen(false)}
+            conversations={conversations}
+            currentConversation={currentConversation}
+            onSelectConversation={setCurrentConversation}
+          />
+        )}
+
+        {isDebugPanelOpen && (
+          <DebugPanel
+            key="debug-panel"
+            isOpen={isDebugPanelOpen}
+            onClose={() => setIsDebugPanelOpen(false)}
+            debugState={debugState}
+            setDebugState={setDebugState}
+            audioState={audioState}
+            testMicrophoneRecording={testMicrophoneRecording}
+            testTranscription={testTranscription}
+            testLLMConnection={testLLMConnection}
+            testTTSConnection={testTTSConnection}
+            connectWebSocket={handleReconnectWebSocket}
+            playAudioResponse={playAudioResponse}
+          />
+        )}
+
+        {isSettingsPanelOpen && (
+          <SettingsPanel
+            key="settings-panel"
+            isOpen={isSettingsPanelOpen}
+            onClose={() => setIsSettingsPanelOpen(false)}
+            settings={settings}
+            onUpdateSetting={updateSetting}
+            onRemoveSetting={handleRemoveSetting}
+            savedConfigs={savedConfigs}
+            onSaveConfig={handleSaveConfig}
+            isSavingConfig={isSavingConfig}
+            isTestingConfig={isTestingConfig}
+            availableModels={availableModels}
+            isLoadingModels={isLoadingModels}
+            onFetchModels={fetchModels}
+          />
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 };

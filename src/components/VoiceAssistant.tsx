@@ -127,7 +127,6 @@ const VoiceAssistant: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Move connectWebSocket declaration before its usage
   const connectWebSocket = useCallback(function initWebSocket() {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return;
@@ -143,7 +142,7 @@ const VoiceAssistant: React.FC = () => {
     }
 
     try {
-      wsRef.current = new WebSocket('ws://localhost:8000/ws');
+      wsRef.current = new WebSocket('ws://localhost:3001/ws');
       connectionAttempts.current++;
       
       wsRef.current.onopen = () => {
@@ -202,70 +201,117 @@ const VoiceAssistant: React.FC = () => {
                   setDebugState(prev => ({
                     ...prev,
                     lastTranscription: data.text,
-                    debugStatus: 'Transcription complete: ' + data.text
+                    debugStatus: 'Transcription complete',
+                    isRecordingTest: false
                   }));
                   break;
-                case 'llm':
-                  setDebugState(prev => ({
-                    ...prev,
-                    lastLLMResponse: data.text,
-                    debugStatus: 'LLM response received'
-                  }));
-                  break;
-                case 'tts':
-                  setDebugState(prev => ({
-                    ...prev,
-                    debugStatus: 'TTS response received'
-                  }));
-                  break;
-                case 'error':
-                  setDebugState(prev => ({
-                    ...prev,
-                    debugStatus: `Error: ${data.message}`
-                  }));
-                  break;
-              }
-              return;
-            }
 
-            // Handle regular app messages
-            if (data.type === 'status' && !isDebugPanelOpen) {
-              switch (data.status) {
-                case 'transcribing':
-                  setStatus('Transcribing your message...');
+                case 'ai_response':
+                  if (!data.text) {
+                    console.warn('Received empty AI response');
+                    return;
+                  }
+                  const messageId = Date.now();
+                  setMessages(prev => [...prev, {
+                    id: messageId,
+                    text: '',
+                    isAI: true,
+                    isStreaming: true
+                  }]);
+                  streamText(data.text, messageId);
                   break;
-                case 'generating_response':
-                  setStatus('Generating response...');
+
+                case 'error':
+                  if (data.error === 'Unknown error') {
+                    console.error('Received error message without details');
+                  } else {
+                    console.error('Server error:', data.error);
+                  }
+                  setAudioState(prev => ({ 
+                    ...prev, 
+                    error: data.error,
+                    isListening: false 
+                  }));
                   break;
-                case 'generating_audio':
-                  setStatus('Converting to speech...');
+
+                case 'status':
+                  if (data.status) {
+                    setStatus(data.status);
+                  }
                   break;
-                case 'playing_audio':
-                  setStatus('Playing response...');
-                  break;
+
+                default:
+                  console.warn('Received unknown debug message type:', data.action);
               }
-            } else if (data.type === 'user_transcription') {
-              setMessages(prev => [...prev, { 
-                id: Date.now(),
-                text: data.text,
-                isAI: false,
-                isStreaming: false
-              }]);
-            } else if (data.type === 'ai_response') {
-              const messageId = Date.now();
-              setMessages(prev => [...prev, { 
-                id: messageId,
-                text: '',
-                isAI: true,
-                isStreaming: true
-              }]);
-              streamText(data.text, messageId);
-            } else if (data.error && !isDebugPanelOpen) {
-              setAudioState(prev => ({ ...prev, error: data.error }));
-              setStatus(data.error);
+            } else {
+              // Handle text messages
+              const safeData = {
+                type: String(data.type || ''),
+                text: String(data.text || ''),
+                error: String(data.error || 'Unknown error'),
+                status: String(data.status || '')
+              };
+
+              // Handle different message types
+              switch (safeData.type) {
+                case 'transcription':
+                  if (!safeData.text) {
+                    console.warn('Received empty transcription');
+                    return;
+                  }
+                  setMessages(prev => [...prev, {
+                    id: Date.now(),
+                    text: safeData.text,
+                    isAI: false,
+                    isStreaming: false
+                  }]);
+                  break;
+
+                case 'ai_response':
+                  if (!safeData.text) {
+                    console.warn('Received empty AI response');
+                    return;
+                  }
+                  const messageId = Date.now();
+                  setMessages(prev => [...prev, {
+                    id: messageId,
+                    text: '',
+                    isAI: true,
+                    isStreaming: true
+                  }]);
+                  streamText(safeData.text, messageId);
+                  break;
+
+                case 'error':
+                  if (safeData.error === 'Unknown error') {
+                    console.error('Received error message without details');
+                  } else {
+                    console.error('Server error:', safeData.error);
+                  }
+                  setAudioState(prev => ({ 
+                    ...prev, 
+                    error: safeData.error,
+                    isListening: false 
+                  }));
+                  break;
+
+                case 'status':
+                  if (safeData.status) {
+                    setStatus(safeData.status);
+                  }
+                  break;
+
+                default:
+                  console.warn('Received unknown message type:', safeData.type);
+              }
             }
-          } catch (e) {
-            console.error('Error parsing WebSocket message:', e);
+          } catch (error) {
+            console.error('Error processing WebSocket message:', error);
+            setAudioState(prev => ({ 
+              ...prev, 
+              error: error instanceof Error ? error.message : 'Failed to process server message',
+              isListening: false
+            }));
           }
         }
       };
@@ -285,7 +331,7 @@ const VoiceAssistant: React.FC = () => {
         wsConnected: false
       }));
     }
-  }, [streamText]);
+  }, [streamText, isDebugPanelOpen]);
 
   useEffect(() => {
     connectWebSocket();
@@ -301,46 +347,122 @@ const VoiceAssistant: React.FC = () => {
     };
   }, [connectWebSocket]);
 
-  const startRecording = async () => {
+  const initializeAudio = async () => {
     try {
-      if (!audioProcessor.current) {
-        await initializeAudio();
+      if (!audioContext.current) {
+        audioContext.current = new AudioContext({
+          sampleRate: 16000  // Match Whisper's expected sample rate
+        });
+      }
+      
+      // Resume AudioContext if it's suspended (browser requires user gesture)
+      if (audioContext.current.state === 'suspended') {
+        await audioContext.current.resume();
       }
 
-      if (audioProcessor.current) {
+      // Load audio worklet
+      await audioContext.current.audioWorklet.addModule('/audioProcessor.js');
+      
+      // Get microphone access
+      audioStream.current = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
+
+      // Create audio processor
+      audioProcessor.current = new AudioWorkletNode(audioContext.current, 'audio-processor');
+      
+      // Set up message handling
+      audioProcessor.current.port.onmessage = (event) => {
+        if (event.data.type === 'audioData' && wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(event.data.buffer);
+        }
+      };
+
+      setAudioState(prev => ({ ...prev, isInitialized: true }));
+      console.log('Initialized with sample rate:', audioContext.current.sampleRate);
+      
+      return true;
+    } catch (error) {
+      console.error('Error initializing audio:', error);
+      setAudioState(prev => ({ 
+        ...prev, 
+        error: 'Failed to initialize audio: ' + error.message,
+        isInitialized: false 
+      }));
+      return false;
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      // Initialize audio on first user interaction
+      if (!audioProcessor.current) {
+        const initialized = await initializeAudio();
+        if (!initialized) return;
+      }
+
+      // Connect audio nodes
+      if (audioStream.current && audioProcessor.current && audioContext.current) {
+        const source = audioContext.current.createMediaStreamSource(audioStream.current);
+        source.connect(audioProcessor.current);
+        audioProcessor.current.connect(audioContext.current.destination);
+        
+        // Start recording
         audioProcessor.current.port.postMessage({ command: 'start' });
         setAudioState(prev => ({ ...prev, isListening: true }));
       }
     } catch (error) {
       console.error('Failed to start recording:', error);
-      setAudioState(prev => ({ ...prev, error: 'Failed to start recording' }));
+      setAudioState(prev => ({ 
+        ...prev, 
+        error: 'Failed to start recording: ' + error.message,
+        isListening: false 
+      }));
     }
   };
 
   const stopRecording = async () => {
     try {
       if (audioProcessor.current) {
+        // Stop recording
         audioProcessor.current.port.postMessage({ command: 'stop' });
+        
+        // Disconnect nodes
+        audioProcessor.current.disconnect();
+        
         setAudioState(prev => ({ ...prev, isListening: false }));
       }
     } catch (error) {
       console.error('Failed to stop recording:', error);
-      setAudioState(prev => ({ ...prev, error: 'Failed to stop recording' }));
+      setAudioState(prev => ({ 
+        ...prev, 
+        error: 'Failed to stop recording: ' + error.message,
+        isListening: false 
+      }));
     }
   };
 
   // Load conversations
   useEffect(() => {
-    const loadConversations = async () => {
+    const fetchConversations = async () => {
       try {
-        const response = await fetch('http://localhost:8000/conversations');
+        const response = await fetch('http://localhost:3001/conversations');
         const data = await response.json();
+        // Handle the conversations data
+        console.log('Conversations:', data);
         setConversations(data);
       } catch (error) {
-        console.error('Error loading conversations:', error);
+        console.error('Error fetching conversations:', error);
       }
     };
-    loadConversations();
+
+    fetchConversations();
   }, []);
 
   // Load conversation messages when selecting a conversation
@@ -440,12 +562,10 @@ const VoiceAssistant: React.FC = () => {
       try {
         setDebugState(prev => ({ ...prev, isRecordingTest: false, debugStatus: 'Processing recording...' }));
         
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          // Send stop recording signal for debug mode
-          wsRef.current.send(JSON.stringify({
-            type: 'debug',
-            action: 'stop_recording'
-          }));
+        if (debugAudioProcessor.current) {
+          debugAudioProcessor.current.port.postMessage({ command: 'stop' });
+          debugAudioProcessor.current.disconnect();
+          debugAudioProcessor.current = null;
         }
 
         if (debugAudioStream.current) {
@@ -453,69 +573,72 @@ const VoiceAssistant: React.FC = () => {
           debugAudioStream.current = null;
         }
 
-        if (debugAudioProcessor.current) {
-          debugAudioProcessor.current.disconnect();
-          debugAudioProcessor.current = null;
-        }
       } catch (error) {
         console.error('Error stopping test recording:', error);
-        setDebugState(prev => ({ ...prev, debugStatus: 'Failed to stop recording' }));
+        setDebugState(prev => ({ ...prev, debugStatus: 'Failed to stop recording: ' + error.message }));
       }
     } else {
       // Start recording
       try {
-        const ctx = audioContext.current;  // Store reference to avoid null checks
+        const ctx = audioContext.current;
         if (ctx.state === 'suspended') {
           await ctx.resume();
         }
 
-        const stream = await navigator.mediaDevices.getUserMedia({
+        // Get microphone access
+        debugAudioStream.current = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
+            sampleRate: 16000,
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
           }
         });
 
-        debugAudioStream.current = stream;
-        const source = ctx.createMediaStreamSource(stream);
+        // Create and connect nodes
+        const source = ctx.createMediaStreamSource(debugAudioStream.current);
         debugAudioProcessor.current = new AudioWorkletNode(ctx, 'audio-processor');
 
+        // Send the actual sample rate to the audio processor
+        debugAudioProcessor.current.port.postMessage({ 
+          command: 'setSampleRate', 
+          sampleRate: ctx.sampleRate 
+        });
+
+        // Set up message handling
         debugAudioProcessor.current.port.onmessage = (event) => {
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(event.data);
+          if (event.data.type === 'audioData' && wsRef.current?.readyState === WebSocket.OPEN) {
+            // Send complete audio data as debug message
+            wsRef.current.send(JSON.stringify({
+              type: 'debug',
+              action: 'transcribe',
+              audio: Array.from(new Float32Array(event.data.buffer))
+            }));
+            
+            setDebugState(prev => ({ 
+              ...prev,
+              debugStatus: 'Processing recording...'
+            }));
           }
         };
 
+        // Connect nodes
         source.connect(debugAudioProcessor.current);
         
-        // Send recording start signal with debug flag
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'debug',
-            action: 'start_recording'
-          }));
-        }
+        // Start recording
+        debugAudioProcessor.current.port.postMessage({ command: 'start' });
 
         setDebugState(prev => ({ 
           ...prev, 
           isRecordingTest: true, 
-          debugStatus: 'Recording test audio... (5 seconds)',
-          lastTranscription: null // Clear previous transcription
+          debugStatus: 'Recording test audio... Click again to stop.',
+          lastTranscription: null
         }));
 
-        // Store the timeout ID so we can clear it if needed
-        const timeoutId = setTimeout(() => {
-          console.log('Debug recording timeout reached, stopping...');
-          testTranscription(); // This will trigger the stop recording logic
-        }, 5000);
-
-        // Clean up the timeout if the component unmounts
-        return () => clearTimeout(timeoutId);
       } catch (error) {
         console.error('Error starting test recording:', error);
-        setDebugState(prev => ({ ...prev, debugStatus: 'Failed to start recording' }));
+        setDebugState(prev => ({ ...prev, debugStatus: 'Failed to start recording: ' + error.message }));
       }
     }
   };
@@ -700,50 +823,6 @@ const VoiceAssistant: React.FC = () => {
 
     // Use createPortal to render the modal outside the main component tree
     return createPortal(modalContent, document.body);
-  };
-
-  const initializeAudio = async () => {
-    try {
-      if (!audioContext.current) {
-        audioContext.current = new AudioContext();
-        await audioContext.current.audioWorklet.addModule('/audioProcessor.js');
-      }
-
-      if (audioContext.current.state === 'suspended') {
-        await audioContext.current.resume();
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        }
-      });
-
-      audioStream.current = stream;
-      const source = audioContext.current.createMediaStreamSource(stream);
-      audioProcessor.current = new AudioWorkletNode(audioContext.current, 'audio-processor');
-
-      audioProcessor.current.port.onmessage = (event) => {
-        if (event.data.type === 'audioData' && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(event.data.buffer);
-        } else if (event.data.type === 'recordingComplete' && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(new Uint8Array([0])); // Signal end of recording
-        }
-      };
-
-      source.connect(audioProcessor.current);
-      setAudioState(prev => ({ ...prev, isInitialized: true, error: null }));
-    } catch (error) {
-      console.error('Error initializing audio:', error);
-      setAudioState(prev => ({ 
-        ...prev, 
-        error: error instanceof Error ? error.message : 'Failed to initialize audio',
-        isInitialized: false
-      }));
-    }
   };
 
   return (

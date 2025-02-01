@@ -1,9 +1,11 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
-import whisper
+import torch
+from transformers import Wav2Vec2ForCTC, AutoProcessor
 import logging
 import sys
+import torchaudio
 
 # Set up logging with a more detailed format
 logging.basicConfig(
@@ -26,35 +28,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Whisper model
+# Initialize MMS model
 logger.info("Starting transcription server initialization...")
-logger.info("Loading Whisper model (this may take a few seconds)...")
-model = whisper.load_model("base")
-logger.info("Whisper model loaded successfully")
+logger.info("Loading MMS-1B model (this may take a few seconds)...")
+
+# Load model and processor
+model_name = "facebook/mms-1b-all"  # Using the fine-tuned ASR version
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = Wav2Vec2ForCTC.from_pretrained(model_name).to(device)
+processor = AutoProcessor.from_pretrained(model_name)
+
+logger.info(f"MMS-1B model loaded successfully on {device}")
 
 @app.post("/transcribe")
 async def transcribe_audio(request: Request):
     logger.debug("Received transcription request")
     
-    # Get binary audio data
-    audio_data = await request.body()
-    logger.debug(f"Received audio data of size: {len(audio_data)} bytes")
-    
-    # Convert to numpy array
-    audio_array = np.frombuffer(audio_data, dtype=np.float32)
-    logger.debug(f"Converted to numpy array of shape: {audio_array.shape}")
-    
-    # Log audio statistics for debugging
-    if len(audio_array) > 0:
-        logger.debug(f"Audio stats - min: {np.min(audio_array):.3f}, max: {np.max(audio_array):.3f}, mean: {np.mean(audio_array):.3f}")
-    
-    # Transcribe using Whisper
     try:
-        logger.debug("Starting transcription...")
-        result = model.transcribe(audio_array)
-        transcription = result["text"].strip()
+        # Get binary audio data
+        audio_data = await request.body()
+        logger.debug(f"Received audio data of size: {len(audio_data)} bytes")
+        
+        # Convert to numpy array
+        audio_array = np.frombuffer(audio_data, dtype=np.float32).copy()
+        logger.debug(f"Converted to numpy array of shape: {audio_array.shape}")
+        
+        # Process directly with the processor
+        inputs = processor(
+            audio_array, 
+            sampling_rate=16000,
+            return_tensors="pt"
+        ).to(device)
+        
+        # Get logits
+        with torch.no_grad():
+            outputs = model(**inputs).logits
+        
+        # Decode
+        ids = torch.argmax(outputs, dim=-1)[0]
+        transcription = processor.decode(ids)
+        
         logger.info(f"Transcription successful: '{transcription}'")
         return {"transcription": transcription}
+        
     except Exception as e:
         logger.error(f"Transcription error: {str(e)}", exc_info=True)
         return {"error": str(e)}

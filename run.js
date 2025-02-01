@@ -18,10 +18,9 @@ processes.push(python);
 
 // Wait for Python server to start
 setTimeout(() => {
-    // Start Express server
+    // Start Express server using the root package.json script
     console.log('\nStarting Express Server...');
-    const express = spawn('npm', ['run', 'dev'], {
-        cwd: './backend',
+    const express = spawn('npm', ['run', 'backend'], {
         stdio: 'inherit'
     });
     processes.push(express);

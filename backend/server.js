@@ -1,11 +1,17 @@
-const express = require('express');
-const cors = require('cors');
-const WebSocket = require('ws');
-const axios = require('axios');
-const dotenv = require('dotenv');
-const { createServer } = require('http');
-const path = require('path');
-const db = require('./database/db');
+import express from 'express';
+import cors from 'cors';
+import { WebSocketServer } from 'ws';
+import axios from 'axios';
+import dotenv from 'dotenv';
+import { createServer } from 'http';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import sqlite3 from 'sqlite3';
+import db from './database/db.js';
+
+// Get __dirname equivalent in ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables from parent directory
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -16,7 +22,7 @@ const server = createServer(app);
 // Configure CORS for both HTTP and WebSocket
 const corsOptions = {
     origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'Connection', 'Upgrade', 'Sec-WebSocket-Key', 'Sec-WebSocket-Version'],
     credentials: true,
     preflightContinue: false,
@@ -41,7 +47,7 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 // Create WebSocket server with CORS validation and better configuration
-const wss = new WebSocket.Server({ 
+const wss = new WebSocketServer({ 
     server,
     verifyClient: ({ origin, req }, callback) => {
         const isAllowed = corsOptions.origin.includes(origin);
@@ -77,19 +83,42 @@ wss.on('error', (error) => {
 
 // Constants
 const PYTHON_SERVER_URL = process.env.PYTHON_SERVER_URL || 'http://localhost:8000';
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
-const LLM_API_ENDPOINT = process.env.LLM_API_ENDPOINT;
+let ELEVENLABS_API_KEY;
+let ELEVENLABS_VOICE_ID;
+let LLM_API_ENDPOINT;
 const PORT = process.env.PORT || 3001;
 
-// Validate required environment variables
-if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID || !LLM_API_ENDPOINT) {
-    console.error('Missing required environment variables:');
-    if (!ELEVENLABS_API_KEY) console.error('- ELEVENLABS_API_KEY');
-    if (!ELEVENLABS_VOICE_ID) console.error('- ELEVENLABS_VOICE_ID');
-    if (!LLM_API_ENDPOINT) console.error('- LLM_API_ENDPOINT');
-    process.exit(1);
+// Load settings from database
+async function loadSettings() {
+    try {
+        const settings = await db.getSettings();
+        
+        // Only validate LLM endpoint and model as they're mandatory
+        if (!settings.llm_api_endpoint || !settings.llm_model) {
+            console.error('Missing required settings:');
+            if (!settings.llm_api_endpoint) console.error('- LLM API Endpoint');
+            if (!settings.llm_model) console.error('- LLM Model');
+            return false;
+        }
+        return true;
+    } catch (error) {
+        console.error('Error loading settings:', error);
+        return false;
+    }
 }
+
+// Load settings before starting server
+loadSettings().then((settingsValid) => {
+    if (!settingsValid) {
+        console.log('Please configure the required settings through the web interface.');
+    }
+    server.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+    });
+}).catch(error => {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+});
 
 // Add request logging middleware
 app.use((req, res, next) => {
@@ -133,84 +162,87 @@ app.get('/conversations/:id', async (req, res) => {
     }
 });
 
-// Helper function to get LLM response
-async function getLLMResponse(text) {
+// Add DELETE endpoint for conversations
+app.delete('/conversations/:id', async (req, res) => {
     try {
-        const response = await axios.post(LLM_API_ENDPOINT, {
-            messages: [
-                { role: "system", content: "You are a helpful AI assistant. Keep responses concise and natural." },
-                { role: "user", content: text }
-            ],
-            model: "llama-3.1-8b-lexi-uncensored-v2",
-            temperature: 0.7,
-            max_tokens: 1000
-        });
-
-        return response.data.choices[0].message.content;
+        const conversationId = parseInt(req.params.id);
+        await db.deleteConversation(conversationId);
+        res.status(200).json({ message: 'Conversation deleted successfully' });
     } catch (error) {
-        console.error('LLM error:', error.message);
-        throw error;
+        console.error('Error deleting conversation:', error);
+        res.status(500).json({ error: 'Failed to delete conversation' });
     }
-}
+});
 
-// Helper function to get TTS response
-async function getTextToSpeech(text) {
+// Settings endpoints
+app.get('/settings', async (req, res) => {
     try {
-        const response = await axios.post(
-            `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
-            {
-                text,
-                model_id: "eleven_monolingual_v1",
-                voice_settings: {
-                    stability: 0.5,
-                    similarity_boost: 0.5
-                }
-            },
-            {
-                headers: {
-                    'Accept': 'audio/mpeg',
-                    'xi-api-key': ELEVENLABS_API_KEY,
-                    'Content-Type': 'application/json'
-                },
-                responseType: 'arraybuffer'
-            }
-        );
-
-        return response.data;
+        const settings = await db.getSettings();
+        res.json(settings);
     } catch (error) {
-        console.error('TTS error:', error.message);
-        throw error;
+        console.error('Error fetching settings:', error);
+        res.status(500).json({ error: 'Failed to fetch settings' });
     }
-}
+});
 
-// Helper function to generate conversation summary
-async function generateConversationSummary(messages) {
-    if (!messages || messages.length === 0) return null;
-
-    const conversationText = messages
-        .map(msg => `${msg.role}: ${msg.content}`)
-        .join('\n');
-
+app.post('/settings', async (req, res) => {
     try {
-        const response = await axios.post(LLM_API_ENDPOINT, {
-            messages: [
-                { 
-                    role: "system", 
-                    content: "You are a helpful AI assistant. Generate a very brief, 2-4 word topic or action that summarizes this conversation. Focus on the key subject or action. Respond ONLY with the summary words, no punctuation or extra text. Example responses: 'Weather Forecast Discussion' or 'Schedule Meeting' or 'Python Code Help'" 
-                },
-                { role: "user", content: conversationText }
-            ],
-            model: "llama-3.1-8b-lexi-uncensored-v2",
-            temperature: 0.7,
-            max_tokens: 20
-        });
-
-        return response.data.choices[0].message.content.trim();
+        const { key, value } = req.body;
+        await db.updateSetting(key, value);
+        res.status(200).json({ message: 'Setting updated successfully' });
     } catch (error) {
-        console.error('Summary generation error:', error.message);
-        return 'New Conversation';
+        console.error('Error updating setting:', error);
+        res.status(500).json({ error: 'Failed to update setting' });
     }
-}
+});
+
+app.delete('/settings/:key', async (req, res) => {
+    try {
+        await db.deleteSetting(req.params.key);
+        res.status(200).json({ message: 'Setting deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting setting:', error);
+        res.status(500).json({ error: 'Failed to delete setting' });
+    }
+});
+
+// Update saved configs endpoints to use the new methods
+app.get('/saved-configs', async (req, res) => {
+  try {
+    const configs = await db.getSavedConfigs();
+    res.json(configs || []);
+  } catch (error) {
+    console.error('Error fetching saved configs:', error);
+    res.status(500).json({ error: 'Failed to fetch saved configurations' });
+  }
+});
+
+app.post('/saved-configs', async (req, res) => {
+  const { name, endpoint, model, temperature, max_tokens } = req.body;
+  
+  if (!name || !endpoint || !model || !temperature || !max_tokens) {
+    res.status(400).json({ error: 'Missing required fields' });
+    return;
+  }
+
+  try {
+    const savedConfig = await db.saveLLMConfig({ name, endpoint, model, temperature, max_tokens });
+    res.json(savedConfig);
+  } catch (error) {
+    console.error('Error saving config:', error);
+    res.status(500).json({ error: 'Failed to save configuration' });
+  }
+});
+
+app.delete('/saved-configs/:id', async (req, res) => {
+  try {
+    await db.deleteSavedConfig(parseInt(req.params.id));
+    res.json({ message: 'Configuration deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting config:', error);
+    res.status(500).json({ error: 'Failed to delete configuration' });
+  }
+});
 
 // Connection handling
 wss.on('connection', (ws, req) => {
@@ -319,7 +351,7 @@ wss.on('connection', (ws, req) => {
                     }));
 
                     // Get and save AI response
-                    const llmResponse = await getLLMResponse(transcription);
+                    const llmResponse = await getLLMResponse(transcription, currentConversationId);
                     await db.addMessage(currentConversationId, 'assistant', llmResponse);
                     
                     // Generate summary after a few messages
@@ -359,7 +391,7 @@ wss.on('connection', (ws, req) => {
         } catch (error) {
             console.error('Error processing message:', error);
             // Send error to client only if connection is still open
-            if (ws.readyState === WebSocket.OPEN) {
+            if (ws.readyState === WebSocketServer.OPEN) {
                 ws.send(JSON.stringify({
                     type: 'error',
                     error: error.message || 'An unexpected error occurred'
@@ -431,11 +463,110 @@ server.on('error', (error) => {
     console.error('HTTP server error:', error);
 });
 
-// Update the server start to include more logging
-server.listen(PORT, () => {
-    console.log(`Server started at ${new Date().toISOString()}`);
-    console.log(`Express server listening on port ${PORT}`);
-    console.log(`WebSocket server is running`);
-    console.log(`CORS enabled for origins:`, corsOptions.origin);
-    console.log(`Python server URL: ${PYTHON_SERVER_URL}`);
-}); 
+// Helper function to get LLM response
+async function getLLMResponse(text, conversationId) {
+    try {
+        const settings = await db.getSettings();
+        
+        // Get previous messages from the conversation for context
+        const previousMessages = await db.getMessagesForContext(conversationId);
+        
+        // Build the messages array with conversation history
+        const messages = [
+            { role: "system", content: "You are a helpful AI assistant. Keep responses concise and natural." },
+            ...previousMessages.map(msg => ({
+                role: msg.role === 'user' ? 'user' : 'assistant',
+                content: msg.content
+            })),
+            { role: "user", content: text }
+        ];
+
+        // Use the chat completions endpoint
+        const response = await axios.post(`${settings.llm_api_endpoint}/v1/chat/completions`, {
+            messages,
+            model: settings.llm_model,
+            temperature: settings.llm_temperature ? parseFloat(settings.llm_temperature) : 0.7,
+            max_tokens: settings.llm_max_tokens ? parseInt(settings.llm_max_tokens) : 1000
+        });
+
+        // Extract the response text from the API response
+        if (response.data && response.data.choices && response.data.choices[0] && response.data.choices[0].message) {
+            return response.data.choices[0].message.content;
+        }
+        
+        throw new Error('Invalid response format from LLM API');
+    } catch (error) {
+        console.error('LLM error:', error.message);
+        throw error;
+    }
+}
+
+// Helper function to get TTS response
+async function getTextToSpeech(text) {
+    try {
+        const settings = await db.getSettings();
+        if (!settings.elevenlabs_api_key || !settings.elevenlabs_voice_id) {
+            console.log('ElevenLabs settings not configured, skipping TTS');
+            return null;
+        }
+
+        const response = await axios.post(
+            `https://api.elevenlabs.io/v1/text-to-speech/${settings.elevenlabs_voice_id}`,
+            {
+                text,
+                model_id: "eleven_monolingual_v1",
+                voice_settings: {
+                    stability: 0.5,
+                    similarity_boost: 0.5
+                }
+            },
+            {
+                headers: {
+                    'Accept': 'audio/mpeg',
+                    'xi-api-key': settings.elevenlabs_api_key,
+                    'Content-Type': 'application/json'
+                },
+                responseType: 'arraybuffer'
+            }
+        );
+
+        return response.data;
+    } catch (error) {
+        console.error('TTS error:', error.message);
+        throw error;
+    }
+}
+
+// Helper function to generate conversation summary
+async function generateConversationSummary(messages) {
+    if (!messages || messages.length === 0) return null;
+
+    const conversationText = messages
+        .map(msg => `${msg.role}: ${msg.content}`)
+        .join('\n');
+
+    try {
+        const settings = await db.getSettings();
+        const response = await axios.post(`${settings.llm_api_endpoint}/v1/chat/completions`, {
+            messages: [
+                { 
+                    role: "system", 
+                    content: "You are a helpful AI assistant. Generate a very brief, 2-4 word topic or action that summarizes this conversation. Focus on the key subject or action. Respond ONLY with the summary words, no punctuation or extra text. Example responses: 'Weather Forecast Discussion' or 'Schedule Meeting' or 'Python Code Help'" 
+                },
+                { role: "user", content: conversationText }
+            ],
+            model: settings.llm_model,
+            temperature: settings.llm_temperature ? parseFloat(settings.llm_temperature) : 0.7,
+            max_tokens: settings.llm_max_tokens ? parseInt(settings.llm_max_tokens) : 20
+        });
+
+        if (response.data && response.data.choices && response.data.choices[0] && response.data.choices[0].message) {
+            return response.data.choices[0].message.content.trim();
+        }
+        
+        throw new Error('Invalid response format from LLM API');
+    } catch (error) {
+        console.error('Summary generation error:', error.message);
+        return 'New Conversation';
+    }
+} 

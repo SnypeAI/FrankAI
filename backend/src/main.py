@@ -5,7 +5,6 @@ import torch
 from transformers import Wav2Vec2ForCTC, AutoProcessor
 import logging
 import sys
-import torchaudio
 
 # Set up logging with a more detailed format
 logging.basicConfig(

@@ -18,7 +18,8 @@ interface ChatMessage {
 interface Conversation {
   id: number;
   title: string;
-  updatedAt: string;
+  updated_at: string;
+  message_count: number;
 }
 
 interface AudioState {

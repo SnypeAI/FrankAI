@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Trash2, MessageSquare } from 'lucide-react';
 import { 
@@ -31,6 +31,9 @@ interface Conversation {
 interface ConversationHistoryProps {
   isOpen: boolean;
   onClose: () => void;
+  conversations: Conversation[];
+  currentConversation: number | null;
+  onSelectConversation: (id: number | null) => void;
 }
 
 const darkTheme = createTheme({
@@ -64,15 +67,10 @@ const darkTheme = createTheme({
   },
 });
 
-const ConversationHistory: React.FC<ConversationHistoryProps> = ({ isOpen, onClose }) => {
-  const [conversations, setConversations] = useState<Conversation[]>([]);
+const ConversationHistory: React.FC<ConversationHistoryProps> = ({ isOpen, onClose, conversations, currentConversation, onSelectConversation }) => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [selectedConversation, setSelectedConversation] = useState<Conversation | null>(null);
   const theme = useTheme();
-
-  useEffect(() => {
-    fetchConversations();
-  }, []);
 
   const handleClose = () => {
     onClose();
@@ -81,17 +79,6 @@ const ConversationHistory: React.FC<ConversationHistoryProps> = ({ isOpen, onClo
   const handleAnimationComplete = () => {
     if (!isOpen) {
       onClose();
-    }
-  };
-
-  const fetchConversations = async () => {
-    try {
-      const response = await fetch('http://localhost:3001/conversations');
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const data = await response.json();
-      setConversations(data);
-    } catch (error) {
-      console.error('Error fetching conversations:', error);
     }
   };
 
@@ -105,7 +92,7 @@ const ConversationHistory: React.FC<ConversationHistoryProps> = ({ isOpen, onClo
       
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       
-      setConversations(prev => prev.filter(conv => conv.id !== selectedConversation.id));
+      onSelectConversation(null);
       setDeleteDialogOpen(false);
       setSelectedConversation(null);
     } catch (error) {

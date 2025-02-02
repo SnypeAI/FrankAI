@@ -377,6 +377,61 @@ wss.on('connection', (ws, req) => {
                     return;
                 }
 
+                // Handle text messages
+                if (jsonData.type === 'message') {
+                    // Create new conversation if none selected
+                    if (!currentConversationId) {
+                        const conversation = await db.createConversation(`New Conversation`);
+                        currentConversationId = conversation.id;
+                        // Notify client of new conversation
+                        ws.send(JSON.stringify({
+                            type: 'new_conversation',
+                            conversation: conversation
+                        }));
+                    }
+
+                    // Save user message
+                    await db.addMessage(currentConversationId, 'user', jsonData.content);
+
+                    // Get and save AI response
+                    const llmResponse = await getLLMResponse(jsonData.content, currentConversationId);
+                    await db.addMessage(currentConversationId, 'assistant', llmResponse);
+
+                    // Generate summary after a few messages
+                    const messages = await db.getMessagesForSummarization(currentConversationId);
+                    if (messages.length >= 2) {
+                        const summary = await generateConversationSummary(messages);
+                        if (summary) {
+                            const now = new Date();
+                            const formattedDate = now.toLocaleString('en-US', {
+                                month: 'short',
+                                day: 'numeric',
+                                hour: 'numeric',
+                                minute: '2-digit',
+                                hour12: true
+                            }).replace(',', '');
+                            const title = `${summary} - ${formattedDate}`;
+                            await db.updateConversationTitle(currentConversationId, title, summary);
+                        }
+                    }
+
+                    // Update conversation timestamp
+                    await db.updateConversationTimestamp(currentConversationId);
+
+                    // Send AI response to client
+                    ws.send(JSON.stringify({
+                        type: 'ai_response',
+                        text: llmResponse
+                    }));
+
+                    // Get TTS response
+                    const audioResponse = await getTextToSpeech(llmResponse);
+                    
+                    // Send audio response to client
+                    ws.send(Buffer.from(audioResponse));
+                    return;
+                }
+
                 // Handle debug messages
                 if (jsonData.type === 'debug') {
                     console.log('Received debug message:', jsonData);

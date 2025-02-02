@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Mic, MicOff, Menu, X, MessageSquare, Bug, Play, RefreshCw, Wand2, Volume2, Settings2 } from 'lucide-react';
+import { Mic, MicOff, Menu, X, MessageSquare, Bug, Play, RefreshCw, Wand2, Volume2, Settings2, Keyboard, Send, Ear } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import DebugPanel from './DebugPanel';
@@ -74,7 +74,10 @@ interface SavedConfig {
   created_at: string;
 }
 
-const VoiceAssistant: React.FC = () => {
+// Input mode types
+type InputMode = 'text' | 'push-to-talk' | 'trigger-word';
+
+const VoiceAssistant = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversation, setCurrentConversation] = useState<number | null>(null);
@@ -133,6 +136,16 @@ const VoiceAssistant: React.FC = () => {
   const [savedConfigs, setSavedConfigs] = useState<SavedConfig[]>([]);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isTestingConfig, setIsTestingConfig] = useState(false);
+
+  // Add new state for keyboard mode
+  const [isKeyboardMode, setIsKeyboardMode] = useState(false);
+  const [textInput, setTextInput] = useState('');
+
+  // Add new state for voice mode
+  const [isVoiceMode, setIsVoiceMode] = useState(false);
+
+  // Add new state for input mode
+  const [inputMode, setInputMode] = useState<InputMode>('text');
 
   // Add helper functions at component level
   const getChipColor = (key: string) => {
@@ -1056,19 +1069,71 @@ const VoiceAssistant: React.FC = () => {
     }
   };
 
+  const handleSendMessage = () => {
+    if (textInput.trim()) {
+      const messageId = Date.now();
+      setMessages(prev => [...prev, {
+        id: messageId,
+        text: textInput.trim(),
+        isAI: false,
+        isStreaming: false
+      }]);
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'message',
+          role: 'user',
+          content: textInput.trim()
+        }));
+      } else {
+        setStatus('Connection error. Please try again.');
+      }
+
+      setTextInput('');
+    }
+  };
+
+  const handleTextSubmit = async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
+
   return (
-    <motion.div 
-      initial={{ opacity: 0 }} 
-      animate={{ opacity: 1 }} 
-      className="h-screen w-full bg-[#0A0A0A] flex flex-col"
-    >
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col">
-        {/* Messages Container */}
-        <motion.div 
-          layout
-          className="flex-1 overflow-y-auto px-6 py-4 space-y-4 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent"
-        >
+    <div className="h-screen w-full bg-[#0A0A0A] flex flex-col overflow-hidden">
+      {/* Top Navigation Bar - Fixed */}
+      <div className="w-full bg-[#1A1A1A] border-b border-white/5 flex-none">
+        <div className="w-full px-6 py-3 flex justify-between items-center">
+          <div className="flex items-center">
+            <button
+              onClick={() => setIsSidebarOpen(true)}
+              className="p-2 rounded-xl hover:bg-white/5 transition-colors"
+            >
+              <Menu className="w-5 h-5 text-white/70" />
+            </button>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => setIsSettingsPanelOpen(true)}
+              className="p-2 rounded-xl hover:bg-white/5 transition-colors"
+            >
+              <Settings2 className="w-5 h-5 text-white/70" />
+            </button>
+            <button
+              onClick={() => setIsDebugPanelOpen(true)}
+              className="p-2 rounded-xl hover:bg-white/5 transition-colors"
+            >
+              <Bug className="w-5 h-5 text-white/70" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Messages Container - Scrollable */}
+      <div className="flex-1 overflow-y-auto min-h-0">
+        <div className="px-6 py-4 space-y-4">
           <AnimatePresence mode="popLayout">
             {messages.map((message) => (
               <motion.div
@@ -1078,16 +1143,32 @@ const VoiceAssistant: React.FC = () => {
                 exit={{ opacity: 0, y: -20 }}
                 className={`flex ${message.isAI ? 'justify-start' : 'justify-end'}`}
               >
-                <motion.div 
-                  layout="position"
-                  className={`max-w-[70%] p-4 rounded-2xl shadow-lg ${
-                    message.isAI 
-                      ? 'bg-[#1E1E1E] text-white rounded-bl-none'
-                      : 'bg-blue-600 text-white rounded-br-none'
-                  }`}
-                >
-                  <p className="text-base whitespace-pre-wrap">
+                <div className={`max-w-[70%] p-4 rounded-2xl shadow-lg ${
+                  message.isAI 
+                    ? 'bg-[#1E1E1E] text-white rounded-bl-none'
+                    : 'bg-blue-600 text-white rounded-br-none'
+                }`}>
+                  <div className="text-base whitespace-pre-wrap">
                     {message.text}
+                    {message.isAI && !message.text && (
+                      <div className="flex items-center space-x-1">
+                        <motion.div
+                          animate={{ opacity: [0, 1, 0] }}
+                          transition={{ duration: 1.5, repeat: Infinity, times: [0, 0.5, 1] }}
+                          className="w-1.5 h-1.5 bg-white/50 rounded-full"
+                        />
+                        <motion.div
+                          animate={{ opacity: [0, 1, 0] }}
+                          transition={{ duration: 1.5, repeat: Infinity, times: [0, 0.5, 1], delay: 0.2 }}
+                          className="w-1.5 h-1.5 bg-white/50 rounded-full"
+                        />
+                        <motion.div
+                          animate={{ opacity: [0, 1, 0] }}
+                          transition={{ duration: 1.5, repeat: Infinity, times: [0, 0.5, 1], delay: 0.4 }}
+                          className="w-1.5 h-1.5 bg-white/50 rounded-full"
+                        />
+                      </div>
+                    )}
                     {message.isStreaming && (
                       <motion.span
                         initial={{ opacity: 0 }}
@@ -1096,103 +1177,168 @@ const VoiceAssistant: React.FC = () => {
                         className="inline-block w-2 h-4 ml-1 bg-blue-400/50"
                       />
                     )}
-                  </p>
-                </motion.div>
+                  </div>
+                </div>
               </motion.div>
             ))}
           </AnimatePresence>
           <div ref={messagesEndRef} />
-        </motion.div>
+        </div>
+      </div>
 
+      {/* Bottom Section - Fixed */}
+      <div className="w-full flex-none">
         {/* Status Bar */}
-        <motion.div 
-          layout
-          className="px-6 py-2 bg-[#1A1A1A] border-t border-white/5"
-        >
-          <div className="max-w-screen-sm mx-auto">
+        <div className="bg-[#1A1A1A] border-t border-white/5">
+          <div className="px-6 py-2">
+            <div className="max-w-screen-sm mx-auto">
+              <AnimatePresence mode="wait">
+                {(audioState.error || (!audioState.wsConnected && !audioState.error)) && (
+                  <motion.div 
+                    key="connection-status"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className={`text-sm font-medium text-center ${
+                      audioState.error ? 'text-red-400' :
+                      !audioState.wsConnected ? 'text-yellow-400' :
+                      'text-blue-400'
+                    }`}
+                  >
+                    {audioState.error ? audioState.error :
+                     !audioState.wsConnected ? 'Connecting to server...' : ''}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+        </div>
+
+        {/* Input Area */}
+        <div className="bg-[#1A1A1A] border-t border-white/5">
+          <div className="max-w-screen-sm mx-auto px-6 py-4 relative">
             <AnimatePresence mode="wait">
-              {(status || audioState.error || (!audioState.wsConnected && !audioState.error)) && (
+              {inputMode === 'text' && (
                 <motion.div 
-                  key={status || 'error'}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.2 }}
-                  className={`text-sm font-medium text-center ${
-                    audioState.error ? 'text-red-400' :
-                    !audioState.wsConnected ? 'text-yellow-400' :
-                    'text-blue-400'
-                  }`}
+                  className="flex items-end"
                 >
-                  {audioState.error ? audioState.error :
-                   !audioState.wsConnected ? 'Connecting to server...' :
-                   status}
+                  <div className="flex-1 relative">
+                    <textarea
+                      value={textInput}
+                      onChange={(e) => setTextInput(e.target.value)}
+                      onKeyDown={handleTextSubmit}
+                      placeholder="Type your message here... (Press Enter to send, Shift + Enter for new line)"
+                      className="w-full p-4 pr-12 bg-[#2A2A2A] text-white rounded-xl border border-white/10 focus:border-white/20 focus:ring-1 focus:ring-white/20 outline-none resize-none"
+                      rows={2}
+                    />
+                    <button
+                      onClick={handleSendMessage}
+                      className="absolute right-3 bottom-3 p-2 rounded-lg text-white/70 hover:text-white/90 transition-colors"
+                    >
+                      <Send className="w-5 h-5" />
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+
+              {inputMode === 'push-to-talk' && (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex justify-center"
+                >
+                  <motion.button
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={audioState.isListening ? stopRecording : startRecording}
+                    disabled={!audioState.isInitialized || processingRef.current || !audioState.wsConnected || !areSettingsConfigured()}
+                    className={`p-6 rounded-2xl transition-all duration-300 shadow-lg ${
+                      !audioState.isInitialized || !audioState.wsConnected || !areSettingsConfigured()
+                        ? 'bg-neutral-800 text-neutral-600'
+                        : audioState.isListening
+                        ? 'bg-green-600 hover:bg-green-700'
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    <motion.div
+                      animate={{ scale: audioState.isListening ? [1, 1.2, 1] : 1 }}
+                      transition={{ repeat: Infinity, duration: 2 }}
+                    >
+                      {audioState.isListening ? (
+                        <MicOff className="w-8 h-8 text-white" />
+                      ) : (
+                        <Mic className="w-8 h-8 text-white" />
+                      )}
+                    </motion.div>
+                  </motion.button>
+                </motion.div>
+              )}
+
+              {inputMode === 'trigger-word' && (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="flex justify-center"
+                >
+                  <motion.button
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={audioState.isListening ? stopRecording : startRecording}
+                    disabled={!audioState.isInitialized || processingRef.current || !audioState.wsConnected || !areSettingsConfigured()}
+                    className={`p-6 rounded-2xl transition-all duration-300 shadow-lg ${
+                      !audioState.isInitialized || !audioState.wsConnected || !areSettingsConfigured()
+                        ? 'bg-neutral-800 text-neutral-600'
+                        : audioState.isListening
+                        ? 'bg-green-600 hover:bg-green-700'
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    <motion.div
+                      animate={{ scale: audioState.isListening ? [1, 1.2, 1] : 1 }}
+                      transition={{ repeat: Infinity, duration: 2 }}
+                    >
+                      <Ear className="w-8 h-8 text-white" />
+                    </motion.div>
+                  </motion.button>
                 </motion.div>
               )}
             </AnimatePresence>
           </div>
-        </motion.div>
 
-        {/* Footer Controls */}
-        <motion.div 
-          layout
-          className="w-full bg-[#1A1A1A] border-t border-white/5"
-        >
-          <div className="max-w-screen-sm mx-auto flex justify-between items-center px-6 py-4">
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => setIsSidebarOpen(true)}
-              className="p-3 rounded-xl hover:bg-white/5 transition-colors"
-            >
-              <Menu className="w-6 h-6 text-white/70" />
-            </motion.button>
-
-            <motion.button
-              whileHover={{ scale: 1.1 }}
-              whileTap={{ scale: 0.9 }}
-              onClick={audioState.isListening ? stopRecording : startRecording}
-              disabled={!audioState.isInitialized || processingRef.current || !audioState.wsConnected || !areSettingsConfigured()}
-              className={`p-6 rounded-2xl transition-all duration-300 shadow-lg ${
-                !audioState.isInitialized || !audioState.wsConnected || !areSettingsConfigured()
-                  ? 'bg-neutral-800 cursor-not-allowed'
-                  : audioState.isListening
-                  ? 'bg-red-600 hover:bg-red-700'
-                  : 'bg-blue-600 hover:bg-blue-700'
-              }`}
-            >
-              <motion.div
-                animate={{ scale: audioState.isListening ? [1, 1.2, 1] : 1 }}
-                transition={{ repeat: Infinity, duration: 2 }}
+          {/* Input Mode Toggles */}
+          <div className="absolute bottom-4 right-6 flex flex-col space-y-2">
+            {inputMode !== 'push-to-talk' && (
+              <button
+                onClick={() => setInputMode('push-to-talk')}
+                className="p-3 rounded-xl bg-neutral-800 text-neutral-600 hover:text-neutral-400 transition-all duration-300 shadow-lg"
               >
-                {audioState.isListening ? (
-                  <MicOff className="w-8 h-8 text-white" />
-                ) : (
-                  <Mic className="w-8 h-8 text-white" />
-                )}
-              </motion.div>
-            </motion.button>
-
-            <div className="flex space-x-2">
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setIsSettingsPanelOpen(true)}
-                className="p-3 rounded-xl hover:bg-white/5 transition-colors"
+                <Mic className="w-5 h-5" />
+              </button>
+            )}
+            {inputMode !== 'trigger-word' && (
+              <button
+                onClick={() => setInputMode('trigger-word')}
+                className="p-3 rounded-xl bg-neutral-800 text-neutral-600 hover:text-neutral-400 transition-all duration-300 shadow-lg"
               >
-                <Settings2 className="w-6 h-6 text-white/70" />
-              </motion.button>
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setIsDebugPanelOpen(true)}
-                className="p-3 rounded-xl hover:bg-white/5 transition-colors"
+                <Ear className="w-5 h-5" />
+              </button>
+            )}
+            {inputMode !== 'text' && (
+              <button
+                onClick={() => setInputMode('text')}
+                className="p-3 rounded-xl bg-neutral-800 text-neutral-600 hover:text-neutral-400 transition-all duration-300 shadow-lg"
               >
-                <Bug className="w-6 h-6 text-white/70" />
-              </motion.button>
-            </div>
+                <Keyboard className="w-5 h-5" />
+              </button>
+            )}
           </div>
-        </motion.div>
+        </div>
       </div>
 
       {/* Panels */}
@@ -1246,7 +1392,7 @@ const VoiceAssistant: React.FC = () => {
           />
         )}
       </AnimatePresence>
-    </motion.div>
+    </div>
   );
 };
 

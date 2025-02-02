@@ -10,7 +10,7 @@ click
 datasets
 dill
 elevenlabs
-fastapi==0.109.2
+fastapi
 filelock
 frozenlist
 fsspec
@@ -29,7 +29,7 @@ multidict
 multiprocess
 networkx
 numba
-numpy==1.26.4
+numpy
 packaging
 pandas
 propcache

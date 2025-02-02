@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI()
 
-# Add CORS middleware
+# Add CORS middleware with specific origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],  # Frontend URLs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -82,4 +82,10 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting uvicorn server...")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug", loop="asyncio")
+    uvicorn.run(
+        app, 
+        host="localhost",  # This will listen on both IPv4 and IPv6
+        port=8000, 
+        log_level="debug", 
+        loop="asyncio"
+    )

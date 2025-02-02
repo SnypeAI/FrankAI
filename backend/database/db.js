@@ -7,67 +7,66 @@ const __dirname = path.dirname(__filename);
 
 class Database {
     constructor() {
-        this.db = null;
+        this.db = new sqlite3.Database(path.join(__dirname, 'Frank.db'));
+        this.init();
     }
 
     async init() {
         return new Promise((resolve, reject) => {
-            this.db = new sqlite3.Database(path.join(__dirname, 'Frank.db'), (err) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-                resolve();
+            this.db.serialize(() => {
+                // Drop and recreate conversations table with summary column
+                this.db.run(`DROP TABLE IF EXISTS conversations`);
+                this.db.run(`
+                    CREATE TABLE conversations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT,
+                        summary TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
+
+                // Drop and recreate messages table with role instead of is_ai
+                this.db.run(`DROP TABLE IF EXISTS messages`);
+                this.db.run(`
+                    CREATE TABLE messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        conversation_id INTEGER,
+                        content TEXT,
+                        role TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                    )
+                `);
+
+                // Create settings table
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    )
+                `);
+
+                // Create saved_configs table if it doesn't exist
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS saved_configs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        endpoint TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        temperature TEXT NOT NULL,
+                        max_tokens TEXT NOT NULL,
+                        elevenlabs_api_key TEXT,
+                        elevenlabs_voice_id TEXT,
+                        is_default BOOLEAN DEFAULT 0,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                `, (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
             });
         });
-    }
-
-    async initializeTables() {
-        // Create settings table if it doesn't exist
-        await this.run(`
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Create saved_configs table if it doesn't exist
-        await this.run(`
-            CREATE TABLE IF NOT EXISTS saved_configs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                endpoint TEXT NOT NULL,
-                model TEXT NOT NULL,
-                temperature TEXT NOT NULL,
-                max_tokens TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Create conversations table if it doesn't exist
-        await this.run(`
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT,
-                summary TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // Create messages table if it doesn't exist
-        await this.run(`
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            )
-        `);
     }
 
     all(query, params = []) {
@@ -98,18 +97,51 @@ class Database {
     }
 
     async getSettings() {
-        const rows = await this.all('SELECT key, value FROM settings');
-        return rows.reduce((acc, row) => {
-            acc[row.key] = row.value;
-            return acc;
-        }, {});
+        return new Promise((resolve, reject) => {
+            this.db.all('SELECT key, value FROM settings', [], (err, rows) => {
+                if (err) {
+                    console.error('Error fetching settings:', err);
+                    reject(err);
+                } else {
+                    console.log('Raw settings from DB:', rows); // Debug log
+                    
+                    const settings = {
+                        elevenlabs_api_key: null,
+                        elevenlabs_voice_id: null,
+                        llm_api_endpoint: '',
+                        llm_model: '',
+                        llm_temperature: 0.7,
+                        llm_max_tokens: 1000
+                    };
+                    
+                    rows.forEach(row => {
+                        if (row.key === 'llm_temperature') {
+                            settings[row.key] = parseFloat(row.value);
+                        } else if (row.key === 'llm_max_tokens') {
+                            settings[row.key] = parseInt(row.value);
+                        } else {
+                            settings[row.key] = row.value;
+                        }
+                    });
+                    
+                    console.log('Processed settings:', settings); // Debug log
+                    resolve(settings);
+                }
+            });
+        });
     }
 
     async updateSetting(key, value) {
-        await this.run(
-            'UPDATE settings SET value = ?, updated_at = datetime("now") WHERE key = ?',
-            [value, key]
-        );
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+                [key, value],
+                (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                }
+            );
+        });
     }
 
     async deleteSetting(key) {
@@ -130,8 +162,12 @@ class Database {
         return new Promise((resolve, reject) => {
             const query = `INSERT INTO conversations (title, created_at, updated_at) 
                          VALUES (?, datetime('now'), datetime('now'))`;
-            this.db.run(query, [title], function(err) {
-                if (err) reject(err);
+            const db = this.db;
+            db.run(query, [title], function(err) {
+                if (err) {
+                    reject(err);
+                    return;
+                }
                 resolve({ 
                     id: this.lastID, 
                     title,
@@ -147,8 +183,12 @@ class Database {
         return new Promise((resolve, reject) => {
             const query = `INSERT INTO messages (conversation_id, role, content, created_at) 
                          VALUES (?, ?, ?, datetime('now'))`;
-            this.db.run(query, [conversationId, role, content], function(err) {
-                if (err) reject(err);
+            const db = this.db;
+            db.run(query, [conversationId, role, content], function(err) {
+                if (err) {
+                    reject(err);
+                    return;
+                }
                 resolve({ 
                     id: this.lastID, 
                     conversationId, 
@@ -167,7 +207,6 @@ class Database {
                 SELECT 
                     c.id,
                     c.title,
-                    c.summary,
                     c.created_at,
                     c.updated_at,
                     COUNT(m.id) as message_count,
@@ -217,7 +256,6 @@ class Database {
                 SELECT 
                     c.id,
                     c.title,
-                    c.summary,
                     c.created_at,
                     c.updated_at,
                     json_group_array(
@@ -290,8 +328,12 @@ class Database {
                              summary = ?,
                              updated_at = datetime('now')
                          WHERE id = ?`;
-            this.db.run(query, [title, summary, id], (err) => {
-                if (err) reject(err);
+            const db = this.db;
+            db.run(query, [title, summary, id], function(err) {
+                if (err) {
+                    reject(err);
+                    return;
+                }
                 resolve();
             });
         });
@@ -303,8 +345,12 @@ class Database {
             const query = `UPDATE conversations 
                          SET updated_at = datetime('now')
                          WHERE id = ?`;
-            this.db.run(query, [id], (err) => {
-                if (err) reject(err);
+            const db = this.db;
+            db.run(query, [id], function(err) {
+                if (err) {
+                    reject(err);
+                    return;
+                }
                 resolve();
             });
         });
@@ -350,20 +396,157 @@ class Database {
 
     // Add saved configs methods
     async getSavedConfigs() {
-        return this.all('SELECT * FROM saved_configs ORDER BY created_at DESC LIMIT 10');
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                'SELECT * FROM saved_configs ORDER BY created_at DESC',
+                [],
+                (err, rows) => {
+                    if (err) reject(err);
+                    else resolve(rows);
+                }
+            );
+        });
     }
 
-    async saveLLMConfig(config) {
-        const { name, endpoint, model, temperature, max_tokens } = config;
-        const result = await this.run(
-            'INSERT INTO saved_configs (name, endpoint, model, temperature, max_tokens) VALUES (?, ?, ?, ?, ?)',
-            [name, endpoint, model, temperature, max_tokens]
-        );
-        return this.get('SELECT * FROM saved_configs WHERE id = ?', [result.lastID]);
+    async saveConfig({ name, endpoint, model, temperature, max_tokens, elevenlabs_api_key, elevenlabs_voice_id }) {
+        return new Promise((resolve, reject) => {
+            const db = this.db;
+            this.db.serialize(() => {
+                const stmt = this.db.prepare(
+                    `INSERT INTO saved_configs (
+                        name, endpoint, model, temperature, max_tokens, 
+                        elevenlabs_api_key, elevenlabs_voice_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+                );
+
+                stmt.run(
+                    [name, endpoint, model, temperature, max_tokens, elevenlabs_api_key, elevenlabs_voice_id],
+                    function(err) {
+                        if (err) {
+                            reject(err);
+                            return;
+                        }
+
+                        const id = this.lastID;
+                        db.get(
+                            'SELECT * FROM saved_configs WHERE id = ?',
+                            [id],
+                            (err, row) => {
+                                if (err) {
+                                    reject(err);
+                                } else if (!row) {
+                                    reject(new Error('Failed to retrieve saved config'));
+                                } else {
+                                    resolve(row);
+                                }
+                            }
+                        );
+                    }
+                );
+            });
+        });
     }
 
-    async deleteSavedConfig(id) {
-        return this.run('DELETE FROM saved_configs WHERE id = ?', [id]);
+    async setDefaultConfig(id) {
+        return new Promise((resolve, reject) => {
+            console.log('Setting default config for id:', id);
+            this.db.serialize(() => {
+                // First, unset any existing default
+                this.db.run('UPDATE saved_configs SET is_default = 0', [], (err) => {
+                    if (err) {
+                        console.error('Error unsetting previous default:', err);
+                        reject(err);
+                        return;
+                    }
+                    console.log('Unset previous default configs');
+
+                    // Then set the new default
+                    this.db.run(
+                        'UPDATE saved_configs SET is_default = 1 WHERE id = ?',
+                        [id],
+                        (err) => {
+                            if (err) {
+                                console.error('Error setting new default:', err);
+                                reject(err);
+                                return;
+                            }
+                            console.log('Set new default config');
+
+                            // Return the updated config
+                            this.db.get(
+                                'SELECT * FROM saved_configs WHERE id = ?',
+                                [id],
+                                (err, row) => {
+                                    if (err) {
+                                        console.error('Error fetching updated config:', err);
+                                        reject(err);
+                                    } else if (!row) {
+                                        console.error('Config not found after setting default');
+                                        reject(new Error('Config not found'));
+                                    } else {
+                                        console.log('Successfully set default config:', row);
+                                        resolve(row);
+                                    }
+                                }
+                            );
+                        }
+                    );
+                });
+            });
+        });
+    }
+
+    async deleteConfig(id) {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'DELETE FROM saved_configs WHERE id = ?',
+                [id],
+                function(err) {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve({ success: true });
+                    }
+                }
+            );
+        });
+    }
+
+    async updateConfig(id, config) {
+        const { endpoint, model, temperature, max_tokens, elevenlabs_api_key, elevenlabs_voice_id } = config;
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                `UPDATE saved_configs 
+                 SET endpoint = ?, 
+                     model = ?, 
+                     temperature = ?, 
+                     max_tokens = ?,
+                     elevenlabs_api_key = ?,
+                     elevenlabs_voice_id = ?
+                 WHERE id = ?`,
+                [endpoint, model, temperature, max_tokens, elevenlabs_api_key, elevenlabs_voice_id, id],
+                (err) => {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
+
+                    this.db.get(
+                        'SELECT * FROM saved_configs WHERE id = ?',
+                        [id],
+                        (err, row) => {
+                            if (err) {
+                                reject(err);
+                            } else if (!row) {
+                                reject(new Error('Config not found'));
+                            } else {
+                                resolve(row);
+                            }
+                        }
+                    );
+                }
+            );
+        });
     }
 
     // Delete a conversation and its messages
@@ -404,6 +587,34 @@ class Database {
                     });
                 });
             });
+        });
+    }
+
+    // Add method to get the default config
+    async getDefaultConfig() {
+        return new Promise(async (resolve, reject) => {
+            try {
+                const defaultConfig = await this.get('SELECT * FROM saved_configs WHERE is_default = 1');
+                
+                if (defaultConfig) {
+                    // Update settings with the default config values
+                    await this.updateSetting('llm_api_endpoint', defaultConfig.endpoint);
+                    await this.updateSetting('llm_model', defaultConfig.model);
+                    await this.updateSetting('llm_temperature', defaultConfig.temperature);
+                    await this.updateSetting('llm_max_tokens', defaultConfig.max_tokens);
+                    if (defaultConfig.elevenlabs_api_key) {
+                        await this.updateSetting('elevenlabs_api_key', defaultConfig.elevenlabs_api_key);
+                    }
+                    if (defaultConfig.elevenlabs_voice_id) {
+                        await this.updateSetting('elevenlabs_voice_id', defaultConfig.elevenlabs_voice_id);
+                    }
+                }
+                
+                resolve(defaultConfig);
+            } catch (error) {
+                console.error('Error in getDefaultConfig:', error);
+                reject(error);
+            }
         });
     }
 }

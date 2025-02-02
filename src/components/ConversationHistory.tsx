@@ -2,11 +2,6 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Trash2, MessageSquare } from 'lucide-react';
 import { 
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
   List,
   ListItem,
   ListItemText,
@@ -20,6 +15,7 @@ import {
   createTheme,
 } from '@mui/material';
 import { format } from 'date-fns';
+import ConfirmationModal from './ConfirmationModal';
 
 interface Conversation {
   id: number;
@@ -54,16 +50,6 @@ const darkTheme = createTheme({
       secondary: 'rgba(255, 255, 255, 0.6)',
     },
     divider: 'rgba(255, 255, 255, 0.1)',
-  },
-  components: {
-    MuiDialog: {
-      styleOverrides: {
-        paper: {
-          backgroundColor: '#1A1A1A',
-          backgroundImage: 'none',
-        },
-      },
-    },
   },
 });
 
@@ -241,60 +227,17 @@ const ConversationHistory: React.FC<ConversationHistoryProps> = ({ isOpen, onClo
                 </List>
               </Box>
 
-              {/* Delete Confirmation Dialog */}
-              <Dialog
-                open={deleteDialogOpen}
+              {/* Delete Confirmation Modal */}
+              <ConfirmationModal
+                isOpen={deleteDialogOpen}
                 onClose={() => setDeleteDialogOpen(false)}
-                PaperProps={{
-                  sx: {
-                    bgcolor: 'background.paper',
-                    borderRadius: 2,
-                    minWidth: 400
-                  }
-                }}
-                TransitionProps={{
-                  enter: true,
-                  exit: true
-                }}
-              >
-                <DialogTitle sx={{ color: 'text.primary' }}>
-                  Delete Conversation
-                </DialogTitle>
-                <DialogContent>
-                  <Typography sx={{ color: 'text.secondary' }}>
-                    Are you sure you want to delete this conversation? This action cannot be undone.
-                  </Typography>
-                </DialogContent>
-                <DialogActions sx={{ p: 2, gap: 1 }}>
-                  <Button
-                    onClick={() => setDeleteDialogOpen(false)}
-                    variant="outlined"
-                    sx={{
-                      borderColor: alpha(theme.palette.primary.main, 0.5),
-                      color: 'text.primary',
-                      '&:hover': {
-                        borderColor: 'primary.main',
-                        bgcolor: alpha(theme.palette.primary.main, 0.08)
-                      }
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleDeleteConversation}
-                    variant="contained"
-                    color="error"
-                    sx={{
-                      bgcolor: 'error.main',
-                      '&:hover': {
-                        bgcolor: 'error.dark'
-                      }
-                    }}
-                  >
-                    Delete
-                  </Button>
-                </DialogActions>
-              </Dialog>
+                onConfirm={handleDeleteConversation}
+                title="Delete Conversation"
+                message={`Are you sure you want to delete "${selectedConversation?.title}"? This action cannot be undone.`}
+                confirmText="Delete"
+                cancelText="Cancel"
+                isDanger={true}
+              />
             </motion.div>
           </>
         )}

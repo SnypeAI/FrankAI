@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Wand2, Volume2, Settings2 } from 'lucide-react';
+import { X, Wand2, Volume2, Settings2, CheckCircle2, XCircle, Star } from 'lucide-react';
 import { motion } from 'framer-motion';
+import ConfirmationModal from './ConfirmationModal';
 
 interface Settings {
   elevenlabs_api_key: string | null;
@@ -19,6 +20,9 @@ interface SavedConfig {
   model: string;
   temperature: string;
   max_tokens: string;
+  elevenlabs_api_key: string | null;
+  elevenlabs_voice_id: string | null;
+  is_default: boolean;
   created_at: string;
 }
 
@@ -52,6 +56,9 @@ interface SettingsPanelProps {
   availableModels: LLMModel[];
   isLoadingModels: boolean;
   onFetchModels: (endpoint: string) => Promise<void>;
+  onDeleteConfig: (id: number) => Promise<void>;
+  onUpdateConfig: (id: number, config: Partial<SavedConfig>) => Promise<void>;
+  onSetDefaultConfig: (id: number) => Promise<void>;
 }
 
 const SaveConfigForm = ({ onSave, isSaving, isTesting }: { 
@@ -94,6 +101,74 @@ const SaveConfigForm = ({ onSave, isSaving, isTesting }: {
   );
 };
 
+// Add voice testing function
+const testElevenLabsVoice = async (apiKey: string, voiceId: string) => {
+  try {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      {
+        method: 'POST',
+        headers: {
+          'Accept': 'audio/mpeg',
+          'xi-api-key': apiKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: "ElevenLabs was connected correctly",
+          model_id: "eleven_monolingual_v1",
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.5
+          }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error('Failed to generate voice test');
+    }
+
+    const audioBlob = await response.blob();
+    const audioUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(audioUrl);
+    await audio.play();
+
+    // Clean up the URL after playing
+    audio.onended = () => URL.revokeObjectURL(audioUrl);
+
+    return true;
+  } catch (error) {
+    console.error('Voice test failed:', error);
+    return false;
+  }
+};
+
+// Add LLM testing function
+const testLLMConnection = async (endpoint: string, model: string): Promise<boolean> => {
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [{ role: "user", content: "Test connection" }],
+        max_tokens: 5
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to connect to LLM');
+    }
+
+    return true;
+  } catch (error) {
+    console.error('LLM connection test failed:', error);
+    return false;
+  }
+};
+
 const SettingsPanel: React.FC<SettingsPanelProps> = ({
   isOpen,
   onClose,
@@ -107,16 +182,25 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   availableModels,
   isLoadingModels,
   onFetchModels,
+  onDeleteConfig,
+  onUpdateConfig,
+  onSetDefaultConfig,
 }) => {
   const [activeTab, setActiveTab] = useState('llm');
   const [formInputs, setFormInputs] = useState({
-    llm_api_endpoint: settings.llm_api_endpoint,
-    llm_model: settings.llm_model,
-    llm_temperature: settings.llm_temperature,
-    llm_max_tokens: settings.llm_max_tokens,
+    llm_api_endpoint: settings.llm_api_endpoint || '',
+    llm_model: settings.llm_model || '',
+    llm_temperature: settings.llm_temperature?.toString() || '0.7',
+    llm_max_tokens: settings.llm_max_tokens?.toString() || '1000',
     elevenlabs_api_key: settings.elevenlabs_api_key || '',
     elevenlabs_voice_id: settings.elevenlabs_voice_id || ''
   });
+  const [isTestingVoice, setIsTestingVoice] = useState(false);
+  const [llmConnectionStatus, setLLMConnectionStatus] = useState<boolean | null>(null);
+  const [isTestingLLM, setIsTestingLLM] = useState(false);
+  const [settingToRemove, setSettingToRemove] = useState<string | null>(null);
+  const [configToDelete, setConfigToDelete] = useState<SavedConfig | null>(null);
+  const [selectedConfig, setSelectedConfig] = useState<SavedConfig | null>(null);
 
   const [filters, setFilters] = useState<ModelFilters>({
     showUncensored: false,
@@ -125,6 +209,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     sortBy: 'name',
     sortDirection: 'asc'
   });
+
+  // Update form inputs when settings change
+  useEffect(() => {
+    setFormInputs({
+      llm_api_endpoint: settings.llm_api_endpoint || '',
+      llm_model: settings.llm_model || '',
+      llm_temperature: settings.llm_temperature?.toString() || '0.7',
+      llm_max_tokens: settings.llm_max_tokens?.toString() || '1000',
+      elevenlabs_api_key: settings.elevenlabs_api_key || '',
+      elevenlabs_voice_id: settings.elevenlabs_voice_id || ''
+    });
+  }, [settings]);
 
   // Helper functions
   const getChipColor = (key: string) => {
@@ -220,6 +316,17 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     { id: 'system', label: 'System', icon: Settings2 }
   ];
 
+  const handleRemoveSetting = async (key: string) => {
+    setSettingToRemove(key);
+  };
+
+  const confirmRemoveSetting = async () => {
+    if (settingToRemove) {
+      await onRemoveSetting(settingToRemove);
+      setSettingToRemove(null);
+    }
+  };
+
   if (!isOpen) return null;
 
   const modalContent = (
@@ -237,17 +344,50 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             {savedConfigs.map((config) => (
               <motion.div
                 key={config.id}
-                className="p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all cursor-pointer"
-                onClick={() => {
-                  onUpdateSetting('llm_api_endpoint', config.endpoint);
-                  onUpdateSetting('llm_model', config.model);
-                  onUpdateSetting('llm_temperature', config.temperature);
-                  onUpdateSetting('llm_max_tokens', config.max_tokens);
-                }}
+                className="p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all group"
               >
-                <h4 className="text-sm font-medium text-white/90 mb-1">{config.name}</h4>
-                <p className="text-xs text-white/50">Model: {config.model}</p>
-                <p className="text-xs text-white/50">Temperature: {config.temperature}</p>
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-sm font-medium text-white/90">{config.name}</h4>
+                    <button
+                      onClick={() => onSetDefaultConfig(config.id)}
+                      className={`transition-opacity ${config.is_default ? 'text-yellow-500' : 'text-white/30 hover:text-yellow-500/70'}`}
+                    >
+                      <Star className="w-4 h-4" fill={config.is_default ? "#EAB308" : "none"} />
+                    </button>
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfigToDelete(config);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-500/20 rounded"
+                  >
+                    <X className="w-3 h-3 text-red-400" />
+                  </button>
+                </div>
+                <div 
+                  className="cursor-pointer"
+                  onClick={() => {
+                    onUpdateSetting('llm_api_endpoint', config.endpoint);
+                    onUpdateSetting('llm_model', config.model);
+                    onUpdateSetting('llm_temperature', config.temperature);
+                    onUpdateSetting('llm_max_tokens', config.max_tokens);
+                    if (config.elevenlabs_api_key) {
+                      onUpdateSetting('elevenlabs_api_key', config.elevenlabs_api_key);
+                    }
+                    if (config.elevenlabs_voice_id) {
+                      onUpdateSetting('elevenlabs_voice_id', config.elevenlabs_voice_id);
+                    }
+                    setSelectedConfig(config);
+                  }}
+                >
+                  <p className="text-xs text-white/50">Model: {config.model}</p>
+                  <p className="text-xs text-white/50">Temperature: {config.temperature}</p>
+                  {config.elevenlabs_voice_id && (
+                    <p className="text-xs text-white/50">Voice ID: {config.elevenlabs_voice_id}</p>
+                  )}
+                </div>
               </motion.div>
             ))}
             {savedConfigs.length === 0 && (
@@ -256,14 +396,34 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
           </div>
         </div>
 
-        {/* Save Config Section - Now at the bottom */}
-        <div className="p-4 border-t border-white/5 bg-black/20">
-          <h4 className="text-xs font-medium text-white/70 mb-2">Save Current Config</h4>
-          <SaveConfigForm
-            onSave={onSaveConfig}
-            isSaving={isSavingConfig}
-            isTesting={isTestingConfig}
-          />
+        {/* Save/Update Config Section */}
+        <div className="p-4 border-t border-white/5 bg-black/20 space-y-4">
+          <div>
+            <h4 className="text-xs font-medium text-white/70 mb-2">Save Current Config</h4>
+            <SaveConfigForm
+              onSave={onSaveConfig}
+              isSaving={isSavingConfig}
+              isTesting={isTestingConfig}
+            />
+          </div>
+
+          {selectedConfig && (
+            <div>
+              <button
+                onClick={() => onUpdateConfig(selectedConfig.id, {
+                  endpoint: settings.llm_api_endpoint,
+                  model: settings.llm_model,
+                  temperature: settings.llm_temperature?.toString(),
+                  max_tokens: settings.llm_max_tokens?.toString(),
+                  elevenlabs_api_key: settings.elevenlabs_api_key,
+                  elevenlabs_voice_id: settings.elevenlabs_voice_id
+                })}
+                className="w-full p-2 rounded-lg text-xs transition-colors bg-purple-600/20 hover:bg-purple-600/30 text-purple-400"
+              >
+                Update "{selectedConfig.name}"
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -284,7 +444,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   </span>
                 </div>
                 <button
-                  onClick={() => onRemoveSetting(key)}
+                  onClick={() => handleRemoveSetting(key)}
                   className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 ml-2"
                 >
                   <X className="w-3 h-3 text-white/90 hover:text-white" />
@@ -297,6 +457,25 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
           )}
         </div>
       </div>
+
+      {/* Confirmation Modal for Delete */}
+      <ConfirmationModal
+        isOpen={configToDelete !== null}
+        onClose={() => setConfigToDelete(null)}
+        onConfirm={async () => {
+          if (configToDelete) {
+            await onDeleteConfig(configToDelete.id);
+            if (selectedConfig?.id === configToDelete.id) {
+              setSelectedConfig(null);
+            }
+          }
+        }}
+        title="Delete Configuration"
+        message={`Are you sure you want to delete "${configToDelete?.name}"? This action cannot be undone.`}
+        confirmText="Delete"
+        cancelText="Cancel"
+        isDanger={true}
+      />
 
       {/* Main Settings Area */}
       <div className="fixed left-64 right-64 bottom-0 top-0 bg-[#1A1A1A] overflow-y-auto">
@@ -342,7 +521,15 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                       type="text"
                       value={formInputs.llm_api_endpoint}
                       onChange={(e) => handleInputChange('llm_api_endpoint', e.target.value)}
-                      onBlur={() => onUpdateSetting('llm_api_endpoint', formInputs.llm_api_endpoint)}
+                      onBlur={async () => {
+                        await onUpdateSetting('llm_api_endpoint', formInputs.llm_api_endpoint);
+                        if (formInputs.llm_api_endpoint && formInputs.llm_model) {
+                          setIsTestingLLM(true);
+                          const success = await testLLMConnection(formInputs.llm_api_endpoint, formInputs.llm_model);
+                          setLLMConnectionStatus(success);
+                          setIsTestingLLM(false);
+                        }
+                      }}
                       className="flex-1 p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
                       placeholder="Enter LLM API endpoint"
                     />
@@ -457,6 +644,14 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         onChange={(e) => {
                           handleInputChange('llm_model', e.target.value);
                           onUpdateSetting('llm_model', e.target.value);
+                          if (formInputs.llm_api_endpoint && e.target.value) {
+                            setIsTestingLLM(true);
+                            testLLMConnection(formInputs.llm_api_endpoint, e.target.value)
+                              .then(success => {
+                                setLLMConnectionStatus(success);
+                                setIsTestingLLM(false);
+                              });
+                          }
                         }}
                         className="w-full p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
                       >
@@ -468,6 +663,34 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         ))}
                       </select>
                     </div>
+
+                    {/* Connection Status */}
+                    {(isTestingLLM || llmConnectionStatus !== null) && (
+                      <div className={`flex items-center space-x-2 p-2 rounded-lg ${
+                        isTestingLLM 
+                          ? 'bg-yellow-500/10 text-yellow-400'
+                          : llmConnectionStatus
+                            ? 'bg-green-500/10 text-green-400'
+                            : 'bg-red-500/10 text-red-400'
+                      }`}>
+                        {isTestingLLM ? (
+                          <>
+                            <div className="animate-spin rounded-full h-4 w-4 border-2 border-yellow-400 border-t-transparent" />
+                            <span className="text-sm">Testing connection...</span>
+                          </>
+                        ) : llmConnectionStatus ? (
+                          <>
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span className="text-sm">Connection successful</span>
+                          </>
+                        ) : (
+                          <>
+                            <XCircle className="w-4 h-4" />
+                            <span className="text-sm">Connection failed</span>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -519,14 +742,28 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </div>
                 <div>
                   <label className="block text-sm text-white/70 mb-1">Voice ID</label>
-                  <input
-                    type="text"
-                    value={formInputs.elevenlabs_voice_id}
-                    onChange={(e) => handleInputChange('elevenlabs_voice_id', e.target.value)}
-                    onBlur={() => onUpdateSetting('elevenlabs_voice_id', formInputs.elevenlabs_voice_id)}
-                    className="w-full p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
-                    placeholder="Enter voice ID"
-                  />
+                  <div className="flex space-x-2">
+                    <input
+                      type="text"
+                      value={formInputs.elevenlabs_voice_id}
+                      onChange={(e) => handleInputChange('elevenlabs_voice_id', e.target.value)}
+                      onBlur={async () => {
+                        await onUpdateSetting('elevenlabs_voice_id', formInputs.elevenlabs_voice_id);
+                        if (formInputs.elevenlabs_voice_id && formInputs.elevenlabs_api_key) {
+                          setIsTestingVoice(true);
+                          await testElevenLabsVoice(formInputs.elevenlabs_api_key, formInputs.elevenlabs_voice_id);
+                          setIsTestingVoice(false);
+                        }
+                      }}
+                      className="flex-1 p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
+                      placeholder="Enter voice ID"
+                    />
+                    {isTestingVoice && (
+                      <div className="flex items-center px-3 text-white/50 text-sm">
+                        Testing...
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

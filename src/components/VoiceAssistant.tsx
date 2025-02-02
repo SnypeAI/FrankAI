@@ -132,9 +132,7 @@ const VoiceAssistant: React.FC = () => {
   // Add state for saved configs
   const [savedConfigs, setSavedConfigs] = useState<SavedConfig[]>([]);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
-  const [localConfigName, setLocalConfigName] = useState('');
   const [isTestingConfig, setIsTestingConfig] = useState(false);
-  const [showSavedConfigs, setShowSavedConfigs] = useState(true);
 
   // Add helper functions at component level
   const getChipColor = (key: string) => {
@@ -175,9 +173,27 @@ const VoiceAssistant: React.FC = () => {
     return value;
   };
 
+  const handleUpdateSetting = async (key: string, value: string) => {
+    let parsedValue: string | number = value;
+    
+    // Parse numeric values
+    if (key === 'llm_temperature') {
+      parsedValue = parseFloat(value) || 0.7;
+    } else if (key === 'llm_max_tokens') {
+      parsedValue = parseInt(value) || 1000;
+    }
+
+    setSettings(prev => ({
+      ...prev,
+      [key]: parsedValue
+    }));
+  };
+
   const handleRemoveSetting = async (key: string) => {
-    await updateSetting(key, '');
-    setSettings(prev => ({ ...prev, [key]: '' }));
+    setSettings(prev => ({
+      ...prev,
+      [key]: null
+    }));
   };
 
   const playAudioResponse = async (audioData: Uint8Array) => {
@@ -232,208 +248,179 @@ const VoiceAssistant: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  const connectWebSocket = useCallback(function initWebSocket() {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      console.log('WebSocket already connected');
-      return;
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
     }
 
-    // Reset connection attempts if manually reconnecting
-    if (connectionAttempts.current >= MAX_RECONNECT_ATTEMPTS) {
+    const wsUrl = 'ws://localhost:3001/ws';
+    wsRef.current = new WebSocket(wsUrl);
+
+    wsRef.current.onopen = () => {
+      console.log('WebSocket connected');
       connectionAttempts.current = 0;
-    }
+      setAudioState(prev => ({ ...prev, wsConnected: true, error: null }));
+    };
 
-    try {
-      wsRef.current = new WebSocket('ws://localhost:3001/ws');
-      connectionAttempts.current++;
+    wsRef.current.onclose = (event) => {
+      console.log('WebSocket closed with code:', event.code);
+      setAudioState(prev => ({ ...prev, wsConnected: false, isListening: false, error: event.reason ? `Connection closed: ${event.reason}` : 'Connection closed' }));
       
-      wsRef.current.onopen = () => {
-        console.log('WebSocket connected successfully');
-        connectionAttempts.current = 0;
-        setAudioState(prev => ({ 
-          ...prev, 
-          wsConnected: true, 
-          error: null 
-        }));
-      };
+      // Only attempt to reconnect if not a normal closure
+      if (event.code !== 1000 && event.code !== 1001 && connectionAttempts.current < MAX_RECONNECT_ATTEMPTS) {
+        console.log(`Attempting to reconnect (${connectionAttempts.current + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+        wsReconnectTimeout.current = setTimeout(connectWebSocket, 2000);
+      }
+    };
 
-      wsRef.current.onclose = (event) => {
-        const reason = event.reason ? `: ${event.reason}` : '';
-        console.log(`WebSocket closed with code: ${event.code}${reason}`);
-        setAudioState(prev => ({ 
-          ...prev, 
-          wsConnected: false,
-          isListening: false,
-          error: event.reason ? `Connection closed: ${event.reason}` : 'Connection closed'
-        }));
+    wsRef.current.onerror = () => {
+      setAudioState(prev => ({ ...prev, error: 'Connection error. Please check if the server is running.', wsConnected: false }));
+    };
 
-        // Only attempt to reconnect if not manually closed
-        if (event.code !== 1000 && connectionAttempts.current < MAX_RECONNECT_ATTEMPTS) {
-          console.log(`Attempting to reconnect (${connectionAttempts.current + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
-          wsReconnectTimeout.current = setTimeout(initWebSocket, 2000);
-        }
-      };
-
-      wsRef.current.onmessage = async (event) => {
-        if (event.data instanceof Blob) {
-          try {
-            const buffer = await event.data.arrayBuffer();
-            const audioData = new Uint8Array(buffer);
-            if (isDebugPanelOpen) {
-              setDebugState(prev => ({ 
-                ...prev, 
-                lastTTSAudio: audioData,
-                debugStatus: 'Audio response received'
-              }));
-            }
-            await playAudioResponse(audioData);
-          } catch (error) {
-            console.error('Error playing audio response:', error);
-            if (!isDebugPanelOpen) {
-              setStatus('Failed to play audio response');
-            }
-          }
-        } else if (typeof event.data === 'string') {
-          try {
-            const data = JSON.parse(event.data);
-            
-            // Handle debug-specific messages
-            if (data.type === 'debug') {
-              switch (data.action) {
-                case 'transcription':
-                  setDebugState(prev => ({
-                    ...prev,
-                    lastTranscription: data.text,
-                    debugStatus: 'Transcription complete',
-                    isRecordingTest: false
-                  }));
-                  break;
-
-                case 'ai_response':
-                  if (!data.text) {
-                    console.warn('Received empty AI response');
-                    return;
-                  }
-                  const messageId = Date.now();
-                  setMessages(prev => [...prev, {
-                    id: messageId,
-                    text: '',
-                    isAI: true,
-                    isStreaming: true
-                  }]);
-                  streamText(data.text, messageId);
-                  break;
-
-                case 'error':
-                  if (data.error === 'Unknown error') {
-                    console.error('Received error message without details');
-                  } else {
-                    console.error('Server error:', data.error);
-                  }
-                  setAudioState(prev => ({ 
-                    ...prev, 
-                    error: data.error,
-                    isListening: false 
-                  }));
-                  break;
-
-                case 'status':
-                  if (data.status) {
-                    setStatus(data.status);
-                  }
-                  break;
-
-                default:
-                  console.warn('Received unknown debug message type:', data.action);
-              }
-            } else {
-              // Handle text messages
-              const safeData = {
-                type: String(data.type || ''),
-                text: String(data.text || ''),
-                error: String(data.error || 'Unknown error'),
-                status: String(data.status || '')
-              };
-
-              // Handle different message types
-              switch (safeData.type) {
-                case 'transcription':
-                  if (!safeData.text) {
-                    console.warn('Received empty transcription');
-                    return;
-                  }
-                  setMessages(prev => [...prev, {
-                    id: Date.now(),
-                    text: safeData.text,
-                    isAI: false,
-                    isStreaming: false
-                  }]);
-                  break;
-
-                case 'ai_response':
-                  if (!safeData.text) {
-                    console.warn('Received empty AI response');
-                    return;
-                  }
-                  const messageId = Date.now();
-                  setMessages(prev => [...prev, {
-                    id: messageId,
-                    text: '',
-                    isAI: true,
-                    isStreaming: true
-                  }]);
-                  streamText(safeData.text, messageId);
-                  break;
-
-                case 'error':
-                  if (safeData.error === 'Unknown error') {
-                    console.error('Received error message without details');
-                  } else {
-                    console.error('Server error:', safeData.error);
-                  }
-                  setAudioState(prev => ({ 
-                    ...prev, 
-                    error: safeData.error,
-                    isListening: false 
-                  }));
-                  break;
-
-                case 'status':
-                  if (safeData.status) {
-                    setStatus(safeData.status);
-                  }
-                  break;
-
-                default:
-                  console.warn('Received unknown message type:', safeData.type);
-              }
-            }
-          } catch (error) {
-            console.error('Error processing WebSocket message:', error);
-            setAudioState(prev => ({ 
+    wsRef.current.onmessage = async (event) => {
+      if (event.data instanceof Blob) {
+        try {
+          const buffer = await event.data.arrayBuffer();
+          const audioData = new Uint8Array(buffer);
+          if (isDebugPanelOpen) {
+            setDebugState(prev => ({ 
               ...prev, 
-              error: error instanceof Error ? error.message : 'Failed to process server message',
-              isListening: false
+              lastTTSAudio: audioData,
+              debugStatus: 'Audio response received'
             }));
           }
+          await playAudioResponse(audioData);
+        } catch (error) {
+          console.error('Error playing audio response:', error);
+          if (!isDebugPanelOpen) {
+            setStatus('Failed to play audio response');
+          }
         }
-      };
+      } else if (typeof event.data === 'string') {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle debug-specific messages
+          if (data.type === 'debug') {
+            switch (data.action) {
+              case 'transcription':
+                setDebugState(prev => ({
+                  ...prev,
+                  lastTranscription: data.text,
+                  debugStatus: 'Transcription complete',
+                  isRecordingTest: false
+                }));
+                break;
 
-      wsRef.current.onerror = () => {
-        setAudioState(prev => ({ 
-          ...prev, 
-          error: 'Connection error. Please check if the server is running.',
-          wsConnected: false
-        }));
-      };
-    } catch (error) {
-      console.error('Error creating WebSocket:', error);
-      setAudioState(prev => ({ 
-        ...prev, 
-        error: 'Failed to create WebSocket connection',
-        wsConnected: false
-      }));
-    }
+              case 'ai_response':
+                if (!data.text) {
+                  console.warn('Received empty AI response');
+                  return;
+                }
+                const messageId = Date.now();
+                setMessages(prev => [...prev, {
+                  id: messageId,
+                  text: '',
+                  isAI: true,
+                  isStreaming: true
+                }]);
+                streamText(data.text, messageId);
+                break;
+
+              case 'error':
+                if (data.error === 'Unknown error') {
+                  console.error('Received error message without details');
+                } else {
+                  console.error('Server error:', data.error);
+                }
+                setAudioState(prev => ({ 
+                  ...prev, 
+                  error: data.error,
+                  isListening: false 
+                }));
+                break;
+
+              case 'status':
+                if (data.status) {
+                  setStatus(data.status);
+                }
+                break;
+
+              default:
+                console.warn('Received unknown debug message type:', data.action);
+            }
+          } else {
+            // Handle text messages
+            const safeData = {
+              type: String(data.type || ''),
+              text: String(data.text || ''),
+              error: String(data.error || 'Unknown error'),
+              status: String(data.status || '')
+            };
+
+            // Handle different message types
+            switch (safeData.type) {
+              case 'transcription':
+                if (!safeData.text) {
+                  console.warn('Received empty transcription');
+                  return;
+                }
+                setMessages(prev => [...prev, {
+                  id: Date.now(),
+                  text: safeData.text,
+                  isAI: false,
+                  isStreaming: false
+                }]);
+                break;
+
+              case 'ai_response':
+                if (!safeData.text) {
+                  console.warn('Received empty AI response');
+                  return;
+                }
+                const messageId = Date.now();
+                setMessages(prev => [...prev, {
+                  id: messageId,
+                  text: '',
+                  isAI: true,
+                  isStreaming: true
+                }]);
+                streamText(safeData.text, messageId);
+                break;
+
+              case 'error':
+                if (safeData.error === 'Unknown error') {
+                  console.error('Received error message without details');
+                } else {
+                  console.error('Server error:', safeData.error);
+                }
+                setAudioState(prev => ({ 
+                  ...prev, 
+                  error: safeData.error,
+                  isListening: false 
+                }));
+                break;
+
+              case 'status':
+                if (safeData.status) {
+                  setStatus(safeData.status);
+                }
+                break;
+
+              default:
+                console.warn('Received unknown message type:', safeData.type);
+            }
+          }
+        } catch (error) {
+          console.error('Error processing WebSocket message:', error);
+          setAudioState(prev => ({ 
+            ...prev, 
+            error: error instanceof Error ? error.message : 'Failed to process server message',
+            isListening: false
+          }));
+        }
+      }
+    };
   }, [streamText, isDebugPanelOpen]);
 
   // Add cleanup function for WebSocket
@@ -674,6 +661,44 @@ const VoiceAssistant: React.FC = () => {
     loadSettings();
   }, []);
 
+  // Load saved configs on mount
+  useEffect(() => {
+    const loadSavedConfigs = async () => {
+      try {
+        const response = await fetch('http://localhost:3001/saved-configs');
+        if (!response.ok) throw new Error('Failed to load saved configs');
+        const configs = await response.json();
+        setSavedConfigs(configs);
+      } catch (error) {
+        console.error('Error loading saved configs:', error);
+      }
+    };
+
+    loadSavedConfigs();
+  }, []);
+
+  // Load settings from localStorage on mount
+  useEffect(() => {
+    const loadSettings = () => {
+      const savedSettings = localStorage.getItem('settings');
+      if (savedSettings) {
+        try {
+          const parsed = JSON.parse(savedSettings);
+          setSettings(parsed);
+        } catch (error) {
+          console.error('Error parsing saved settings:', error);
+        }
+      }
+    };
+
+    loadSettings();
+  }, []);
+
+  // Save settings to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem('settings', JSON.stringify(settings));
+  }, [settings]);
+
   // Function to fetch available models
   const fetchModels = async (endpoint: string) => {
     setIsLoadingModels(true);
@@ -691,28 +716,6 @@ const VoiceAssistant: React.FC = () => {
       return [];
     } finally {
       setIsLoadingModels(false);
-    }
-  };
-
-  // Update the updateSetting function to remove automatic model fetching
-  const updateSetting = async (key: string, value: string) => {
-    try {
-      const response = await fetch('http://localhost:3001/settings', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ key, value }),
-      });
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
-      setSettings(prev => ({ ...prev, [key]: value }));
-    } catch (error) {
-      console.error('Failed to update setting:', error);
-      setStatus('Failed to save setting. Please try again.');
     }
   };
 
@@ -892,10 +895,9 @@ const VoiceAssistant: React.FC = () => {
     }
   };
 
-  // Add this function back for the SettingsPanel
   const handleSaveConfig = async (name: string) => {
     if (!name) {
-      setStatus('Please enter a name for this configuration');
+      console.error('Please enter a name for this configuration');
       return;
     }
 
@@ -918,7 +920,7 @@ const VoiceAssistant: React.FC = () => {
       });
 
       if (!response.ok) {
-        setStatus('Failed to test connection to LLM');
+        console.error('Failed to test connection to LLM');
         setIsSavingConfig(false);
         setIsTestingConfig(false);
         return;
@@ -927,7 +929,7 @@ const VoiceAssistant: React.FC = () => {
       setIsTestingConfig(false);
 
       // Save the config
-      const response2 = await fetch('http://localhost:3001/saved-configs', {
+      const saveResponse = await fetch('http://localhost:3001/saved-configs', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -937,23 +939,120 @@ const VoiceAssistant: React.FC = () => {
           endpoint: settings.llm_api_endpoint,
           model: settings.llm_model,
           temperature: settings.llm_temperature?.toString() || '0.7',
-          max_tokens: settings.llm_max_tokens?.toString() || '1000'
+          max_tokens: settings.llm_max_tokens?.toString() || '1000',
+          elevenlabs_api_key: settings.elevenlabs_api_key || null,
+          elevenlabs_voice_id: settings.elevenlabs_voice_id || null
         }),
       });
 
-      if (!response2.ok) {
-        throw new Error(`HTTP error! status: ${response2.status}`);
+      if (!saveResponse.ok) {
+        throw new Error(`HTTP error! status: ${saveResponse.status}`);
       }
 
-      const savedConfig = await response2.json();
-      setSavedConfigs(prev => [savedConfig, ...prev].slice(0, 10));
-      setStatus('Configuration saved successfully');
+      const savedConfig = await saveResponse.json();
+      setSavedConfigs(prev => [savedConfig, ...prev]);
     } catch (error) {
-      setStatus('Error saving configuration');
-      console.error('Error:', error);
+      console.error('Error saving configuration:', error);
     } finally {
       setIsSavingConfig(false);
       setIsTestingConfig(false);
+    }
+  };
+
+  const handleDeleteConfig = async (id: number) => {
+    try {
+      const response = await fetch(`http://localhost:3001/saved-configs/${id}`, {
+        method: 'DELETE'
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to delete configuration');
+      }
+
+      setSavedConfigs(prev => prev.filter(config => config.id !== id));
+    } catch (error) {
+      console.error('Error deleting configuration:', error);
+    }
+  };
+
+  const handleUpdateConfig = async (id: number, updatedConfig: Partial<SavedConfig>) => {
+    try {
+      const response = await fetch(`http://localhost:3001/saved-configs/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updatedConfig)
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update configuration');
+      }
+
+      const updated = await response.json();
+      setSavedConfigs(prev => prev.map(config => 
+        config.id === id ? { ...config, ...updated } : config
+      ));
+    } catch (error) {
+      console.error('Error updating configuration:', error);
+    }
+  };
+
+  // Add to your useEffect for initial loading
+  useEffect(() => {
+    const loadInitialData = async () => {
+      try {
+        // Load saved configs
+        const configsResponse = await fetch('http://localhost:3001/saved-configs');
+        if (configsResponse.ok) {
+          const configs = await configsResponse.json();
+          setSavedConfigs(configs);
+          
+          // Load default config if exists
+          const defaultConfigResponse = await fetch('http://localhost:3001/saved-configs/default');
+          if (defaultConfigResponse.ok) {
+            const defaultConfig = await defaultConfigResponse.json();
+            if (defaultConfig) { // Only apply settings if a default config exists
+              // Apply default config settings
+              await handleUpdateSetting('llm_api_endpoint', defaultConfig.endpoint);
+              await handleUpdateSetting('llm_model', defaultConfig.model);
+              await handleUpdateSetting('llm_temperature', defaultConfig.temperature);
+              await handleUpdateSetting('llm_max_tokens', defaultConfig.max_tokens);
+              if (defaultConfig.elevenlabs_api_key) {
+                await handleUpdateSetting('elevenlabs_api_key', defaultConfig.elevenlabs_api_key);
+              }
+              if (defaultConfig.elevenlabs_voice_id) {
+                await handleUpdateSetting('elevenlabs_voice_id', defaultConfig.elevenlabs_voice_id);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error loading initial data:', error);
+      }
+    };
+
+    loadInitialData();
+  }, []);
+
+  // Add handler for setting default config
+  const handleSetDefaultConfig = async (id: number) => {
+    try {
+      const response = await fetch(`http://localhost:3001/saved-configs/${id}/set-default`, {
+        method: 'POST'
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to set default configuration');
+      }
+
+      const updatedConfig = await response.json();
+      setSavedConfigs(prev => prev.map(config => ({
+        ...config,
+        is_default: config.id === id
+      })));
+    } catch (error) {
+      console.error('Error setting default config:', error);
     }
   };
 
@@ -1132,10 +1231,13 @@ const VoiceAssistant: React.FC = () => {
             isOpen={isSettingsPanelOpen}
             onClose={() => setIsSettingsPanelOpen(false)}
             settings={settings}
-            onUpdateSetting={updateSetting}
+            onUpdateSetting={handleUpdateSetting}
             onRemoveSetting={handleRemoveSetting}
             savedConfigs={savedConfigs}
             onSaveConfig={handleSaveConfig}
+            onDeleteConfig={handleDeleteConfig}
+            onUpdateConfig={handleUpdateConfig}
+            onSetDefaultConfig={handleSetDefaultConfig}
             isSavingConfig={isSavingConfig}
             isTestingConfig={isTestingConfig}
             availableModels={availableModels}

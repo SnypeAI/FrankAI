@@ -23,8 +23,18 @@ const server = createServer(app);
 // Configure CORS for both HTTP and WebSocket
 const corsOptions = {
     origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
-    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'Connection', 'Upgrade', 'Sec-WebSocket-Key', 'Sec-WebSocket-Version'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'Accept',
+        'Origin',
+        'Connection',
+        'Upgrade',
+        'Sec-WebSocket-Key',
+        'Sec-WebSocket-Version',
+        'Sec-WebSocket-Extensions'
+    ],
     credentials: true,
     preflightContinue: false,
     optionsSuccessStatus: 204
@@ -50,12 +60,12 @@ server.on('upgrade', (request, socket, head) => {
 // Create WebSocket server with CORS validation and better configuration
 const wss = new WebSocketServer({ 
     server,
+    path: '/ws',
     verifyClient: ({ origin, req }, callback) => {
-        const isAllowed = corsOptions.origin.includes(origin);
+        const isAllowed = !origin || corsOptions.origin.includes(origin);
         callback(isAllowed);
     },
     clientTracking: true,
-    // Increase timeout values
     handleProtocols: () => 'json',
     perMessageDeflate: {
         zlibDeflateOptions: {
@@ -109,6 +119,13 @@ try {
 // Load settings from database
 async function loadSettings() {
     try {
+        // First try to load the default config
+        const defaultConfig = await db.getDefaultConfig();
+        if (defaultConfig) {
+            console.log('Loaded default config:', defaultConfig);
+        }
+        
+        // Then get the settings (which should now include the default config values)
         const settings = await db.getSettings();
         
         // Only validate LLM endpoint and model as they're mandatory
@@ -207,7 +224,7 @@ app.post('/settings', async (req, res) => {
     try {
         const { key, value } = req.body;
         await db.updateSetting(key, value);
-        res.status(200).json({ message: 'Setting updated successfully' });
+        res.json({ success: true });
     } catch (error) {
         console.error('Error updating setting:', error);
         res.status(500).json({ error: 'Failed to update setting' });
@@ -224,41 +241,104 @@ app.delete('/settings/:key', async (req, res) => {
     }
 });
 
-// Update saved configs endpoints to use the new methods
+// Update saved configs endpoints
 app.get('/saved-configs', async (req, res) => {
   try {
     const configs = await db.getSavedConfigs();
-    res.json(configs || []);
+    res.json(configs);
   } catch (error) {
-    console.error('Error fetching saved configs:', error);
-    res.status(500).json({ error: 'Failed to fetch saved configurations' });
+    console.error('Error getting saved configs:', error);
+    res.status(500).json({ error: 'Failed to get saved configs' });
+  }
+});
+
+// Add endpoint to get default config
+app.get('/saved-configs/default', async (req, res) => {
+  try {
+    const config = await db.getDefaultConfig();
+    res.json(config || null); // Return null if no default config exists
+  } catch (error) {
+    console.error('Error getting default config:', error);
+    res.status(500).json({ error: 'Failed to get default config' });
+  }
+});
+
+// Add endpoint to set default config
+app.post('/saved-configs/:id/set-default', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const config = await db.setDefaultConfig(id);
+    res.json(config);
+  } catch (error) {
+    console.error('Error setting default config:', error);
+    res.status(500).json({ error: 'Failed to set default config' });
   }
 });
 
 app.post('/saved-configs', async (req, res) => {
-  const { name, endpoint, model, temperature, max_tokens } = req.body;
-  
-  if (!name || !endpoint || !model || !temperature || !max_tokens) {
-    res.status(400).json({ error: 'Missing required fields' });
-    return;
-  }
-
   try {
-    const savedConfig = await db.saveLLMConfig({ name, endpoint, model, temperature, max_tokens });
-    res.json(savedConfig);
+    const { 
+      name, 
+      endpoint, 
+      model, 
+      temperature, 
+      max_tokens,
+      elevenlabs_api_key,
+      elevenlabs_voice_id
+    } = req.body;
+    
+    const config = await db.saveConfig({ 
+      name, 
+      endpoint, 
+      model, 
+      temperature, 
+      max_tokens,
+      elevenlabs_api_key,
+      elevenlabs_voice_id
+    });
+    res.json(config);
   } catch (error) {
     console.error('Error saving config:', error);
-    res.status(500).json({ error: 'Failed to save configuration' });
+    res.status(500).json({ error: 'Failed to save config' });
   }
 });
 
 app.delete('/saved-configs/:id', async (req, res) => {
   try {
-    await db.deleteSavedConfig(parseInt(req.params.id));
-    res.json({ message: 'Configuration deleted successfully' });
+    const { id } = req.params;
+    await db.deleteConfig(id);
+    res.json({ success: true });
   } catch (error) {
     console.error('Error deleting config:', error);
-    res.status(500).json({ error: 'Failed to delete configuration' });
+    res.status(500).json({ error: 'Failed to delete config' });
+  }
+});
+
+// Add PUT route for updating configs
+app.put('/saved-configs/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      endpoint, 
+      model, 
+      temperature, 
+      max_tokens,
+      elevenlabs_api_key,
+      elevenlabs_voice_id
+    } = req.body;
+    
+    const config = await db.updateConfig(id, { 
+      endpoint, 
+      model, 
+      temperature, 
+      max_tokens,
+      elevenlabs_api_key,
+      elevenlabs_voice_id
+    });
+    res.json(config);
+  } catch (error) {
+    console.error('Error updating config:', error);
+    res.status(500).json({ error: 'Failed to update config' });
   }
 });
 
@@ -485,6 +565,19 @@ server.on('error', (error) => {
 async function getLLMResponse(text, conversationId) {
     try {
         const settings = await db.getSettings();
+        console.log('Current settings:', settings); // Debug log
+
+        if (!settings.llm_api_endpoint) {
+            console.error('LLM API endpoint missing from settings:', settings);
+            throw new Error('LLM API endpoint not configured');
+        }
+
+        // Ensure the endpoint ends with a slash if it doesn't already
+        const baseUrl = settings.llm_api_endpoint.endsWith('/')
+            ? settings.llm_api_endpoint
+            : settings.llm_api_endpoint + '/';
+        
+        console.log('Using LLM endpoint:', baseUrl); // Debug log
         
         // Get previous messages from the conversation for context
         const previousMessages = await db.getMessagesForContext(conversationId);
@@ -499,8 +592,15 @@ async function getLLMResponse(text, conversationId) {
             { role: "user", content: text }
         ];
 
-        // Use the chat completions endpoint
-        const response = await axios.post(`${settings.llm_api_endpoint}/v1/chat/completions`, {
+        console.log('Sending request to LLM with config:', {
+            endpoint: baseUrl + 'v1/chat/completions',
+            model: settings.llm_model,
+            temperature: settings.llm_temperature,
+            max_tokens: settings.llm_max_tokens
+        }); // Debug log
+
+        // Use the chat completions endpoint with the full URL
+        const response = await axios.post(`${baseUrl}v1/chat/completions`, {
             messages,
             model: settings.llm_model,
             temperature: settings.llm_temperature ? parseFloat(settings.llm_temperature) : 0.7,

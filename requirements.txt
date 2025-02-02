@@ -61,7 +61,6 @@ typing_extensions
 tzdata
 urllib3
 uvicorn
-uvloop
 watchfiles
 websockets
 xxhash

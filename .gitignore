@@ -127,3 +127,6 @@ Desktop.ini
 
 # Hugging Face cache
 .cache/huggingface/
+
+# Database files
+backend/database/*.db

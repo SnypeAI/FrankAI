@@ -10,7 +10,7 @@ click
 datasets
 dill
 elevenlabs
-fastapi
+fastapi==0.109.2
 filelock
 frozenlist
 fsspec
@@ -29,8 +29,7 @@ multidict
 multiprocess
 networkx
 numba
-numpy
-openai-whisper
+numpy==1.26.4
 packaging
 pandas
 propcache
@@ -67,3 +66,4 @@ xxhash
 yarl
 accelerate
 soundfile
+colorama

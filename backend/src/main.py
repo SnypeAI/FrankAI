@@ -5,14 +5,75 @@ import torch
 from transformers import Wav2Vec2ForCTC, AutoProcessor
 import logging
 import sys
+import colorama
+from colorama import Fore, Style
+import uvicorn
 
-# Set up logging with a more detailed format
+# Initialize colorama for cross-platform color support
+colorama.init()
+
+# Create a custom formatter that adds colors
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        logging.DEBUG: Style.DIM + Fore.WHITE,
+        logging.INFO: Fore.CYAN,
+        logging.WARNING: Fore.YELLOW,
+        logging.ERROR: Fore.RED,
+        logging.CRITICAL: Fore.RED + Style.BRIGHT
+    }
+
+    def format(self, record):
+        # Skip huggingface debug messages
+        if record.name.startswith('transformers') or record.name.startswith('huggingface'):
+            if record.levelno <= logging.INFO:
+                return None
+
+        # Add color to the level name and message
+        color = self.COLORS.get(record.levelno, Style.RESET_ALL)
+        
+        # Check for success messages and color them green
+        if record.levelno == logging.INFO and any(x in record.msg.lower() for x in ['success', 'complete', 'loaded successfully']):
+            color = Fore.GREEN
+        
+        # Special handling for uvicorn logs to avoid duplicates
+        if record.name == 'uvicorn.error' or record.name == 'uvicorn.access':
+            # Skip duplicate startup messages
+            if any(x in record.msg for x in ['Started server process', 'Waiting for application', 'Application startup', 'Uvicorn running']):
+                if hasattr(self, '_seen_messages') and record.msg in self._seen_messages:
+                    return None
+                if not hasattr(self, '_seen_messages'):
+                    self._seen_messages = set()
+                self._seen_messages.add(record.msg)
+            
+            record.levelname = f"{color}{record.levelname}{Style.RESET_ALL}"
+            record.msg = f"{color}{record.msg}{Style.RESET_ALL}"
+            return super().format(record)
+            
+        record.levelname = f"{color}{record.levelname}{Style.RESET_ALL}"
+        record.msg = f"{color}{record.msg}{Style.RESET_ALL}"
+        
+        return super().format(record)
+
+# Set up logging with the custom formatter
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
-    datefmt='%H:%M:%S',
-    stream=sys.stdout  # Ensure logs go to stdout for the Node.js runner
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s',
+    stream=sys.stdout
 )
+
+# Apply the custom formatter to all loggers
+formatter = ColoredFormatter('%(levelname)s: %(message)s')
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(formatter)
+
+# Configure uvicorn's logger
+logging.getLogger("uvicorn.error").handlers = logging.getLogger().handlers
+logging.getLogger("uvicorn.access").handlers = logging.getLogger().handlers
+
+# Filter out huggingface debug messages
+logging.getLogger('transformers').setLevel(logging.WARNING)
+logging.getLogger('huggingface').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
@@ -80,12 +141,14 @@ async def health_check():
     return {"status": "ok"}
 
 if __name__ == "__main__":
-    import uvicorn
     logger.info("Starting uvicorn server...")
-    uvicorn.run(
-        app, 
-        host="localhost",  # This will listen on both IPv4 and IPv6
-        port=8000, 
-        log_level="debug", 
-        loop="asyncio"
+    uvicorn_config = uvicorn.Config(
+        app,
+        host="localhost",
+        port=8000,
+        log_level="info",
+        loop="asyncio",
+        log_config=None  # Disable uvicorn's default logging config
     )
+    server = uvicorn.Server(uvicorn_config)
+    server.run()

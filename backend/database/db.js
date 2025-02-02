@@ -7,16 +7,17 @@ const __dirname = path.dirname(__filename);
 
 class Database {
     constructor() {
-        this.db = new sqlite3.Database(path.join(__dirname, 'Frank.db'), (err) => {
-            if (err) {
-                console.error('Error opening database:', err);
-                return;
-            }
-            console.log('Connected to Frank database.');
-            
-            // Initialize tables
-            this.initializeTables().catch(err => {
-                console.error('Error initializing tables:', err);
+        this.db = null;
+    }
+
+    async init() {
+        return new Promise((resolve, reject) => {
+            this.db = new sqlite3.Database(path.join(__dirname, 'Frank.db'), (err) => {
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                resolve();
             });
         });
     }
@@ -407,5 +408,4 @@ class Database {
     }
 }
 
-const db = new Database();
-export default db; 
+export default new Database(); 

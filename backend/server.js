@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import sqlite3 from 'sqlite3';
 import db from './database/db.js';
+import chalk from 'chalk';
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -88,6 +89,23 @@ let ELEVENLABS_VOICE_ID;
 let LLM_API_ENDPOINT;
 const PORT = process.env.PORT || 3001;
 
+// Custom logger
+const logger = {
+    info: (msg) => console.log(chalk.magenta(`[Express] ${msg}`)),
+    error: (msg) => console.log(chalk.red(`[Express Error] ${msg}`)),
+    warn: (msg) => console.log(chalk.yellow(`[Express Warning] ${msg}`)),
+    success: (msg) => console.log(chalk.green(`[Express] ${msg}`))
+};
+
+// Initialize database connection
+try {
+    await db.init();
+    logger.success('Connected to Frank database.');
+} catch (error) {
+    logger.error('Failed to connect to database: ' + error);
+    process.exit(1);
+}
+
 // Load settings from database
 async function loadSettings() {
     try {
@@ -110,19 +128,19 @@ async function loadSettings() {
 // Load settings before starting server
 loadSettings().then((settingsValid) => {
     if (!settingsValid) {
-        console.log('Please configure the required settings through the web interface.');
+        logger.warn('Please configure the required settings through the web interface.');
     }
     server.listen(PORT, () => {
-        console.log(`Server is running on port ${PORT}`);
+        logger.info(`Server is running on port ${PORT}`);
     });
 }).catch(error => {
-    console.error('Failed to start server:', error);
+    logger.error('Failed to start server: ' + error);
     process.exit(1);
 });
 
 // Add request logging middleware
 app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+    logger.info(`${req.method} ${req.url}`);
     next();
 });
 
@@ -246,7 +264,7 @@ app.delete('/saved-configs/:id', async (req, res) => {
 
 // Connection handling
 wss.on('connection', (ws, req) => {
-    console.log(`Client connected from ${req.socket.remoteAddress}`);
+    logger.info(`Client connected from ${req.socket.remoteAddress}`);
     clients.add(ws);
     
     // Set up ping-pong to keep connection alive
@@ -402,14 +420,14 @@ wss.on('connection', (ws, req) => {
 
     // Handle client disconnect
     ws.on('close', () => {
-        console.log(`Client disconnected from ${req.socket.remoteAddress}`);
+        logger.info(`Client disconnected from ${req.socket.remoteAddress}`);
         clients.delete(ws);
         ws.isAlive = false;
     });
 
     // Handle errors
     ws.on('error', (error) => {
-        console.error('WebSocket client error:', error);
+        logger.error('WebSocket client error: ' + error);
         clients.delete(ws);
         ws.isAlive = false;
     });
@@ -449,9 +467,9 @@ app.get('/health', (req, res) => {
     });
 });
 
-// Error handling middleware (place this before routes)
+// Update error handling middleware
 app.use((err, req, res, next) => {
-    console.error('Express error:', err);
+    logger.error(err);
     res.status(500).json({ 
         error: 'Internal server error',
         message: process.env.NODE_ENV === 'development' ? err.message : undefined
@@ -460,7 +478,7 @@ app.use((err, req, res, next) => {
 
 // Add error event handler for the server
 server.on('error', (error) => {
-    console.error('HTTP server error:', error);
+    logger.error('HTTP server error: ' + error);
 });
 
 // Helper function to get LLM response

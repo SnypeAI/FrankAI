@@ -227,31 +227,33 @@ class Database {
                 if (err) {
                     console.error('Error fetching settings:', err);
                     reject(err);
-                } else {
-                    console.log('Raw settings from DB:', rows); // Debug log
-                    
-                    const settings = {
-                        elevenlabs_api_key: null,
-                        elevenlabs_voice_id: null,
-                        llm_api_endpoint: '',
-                        llm_model: '',
-                        llm_temperature: 0.7,
-                        llm_max_tokens: 1000
-                    };
-                    
-                    rows.forEach(row => {
-                        if (row.key === 'llm_temperature') {
-                            settings[row.key] = parseFloat(row.value);
-                        } else if (row.key === 'llm_max_tokens') {
-                            settings[row.key] = parseInt(row.value);
-                        } else {
-                            settings[row.key] = row.value;
-                        }
-                    });
-                    
-                    console.log('Processed settings:', settings); // Debug log
-                    resolve(settings);
+                    return;
                 }
+                
+                console.log('Raw settings from DB:', rows); // Debug log
+                
+                const settings = {
+                    elevenlabs_api_key: null,
+                    elevenlabs_voice_id: null,
+                    elevenlabs_enabled: 'true', // Default to enabled
+                    llm_api_endpoint: '',
+                    llm_model: '',
+                    llm_temperature: 0.7,
+                    llm_max_tokens: 1000
+                };
+                
+                rows.forEach(row => {
+                    if (row.key === 'llm_temperature') {
+                        settings[row.key] = parseFloat(row.value);
+                    } else if (row.key === 'llm_max_tokens') {
+                        settings[row.key] = parseInt(row.value);
+                    } else {
+                        settings[row.key] = row.value;
+                    }
+                });
+                
+                console.log('Processed settings:', settings); // Debug log
+                resolve(settings);
             });
         });
     }

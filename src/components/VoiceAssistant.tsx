@@ -45,6 +45,7 @@ interface Settings {
   llm_model: string;
   llm_temperature: number;
   llm_max_tokens: number;
+  elevenlabs_enabled: string;
 }
 
 interface ModelFilters {
@@ -100,7 +101,8 @@ const VoiceAssistant = () => {
     llm_api_endpoint: '',
     llm_model: '',
     llm_temperature: 0.7,
-    llm_max_tokens: 1000
+    llm_max_tokens: 1000,
+    elevenlabs_enabled: 'true'
   });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [audioState, setAudioState] = useState<AudioState>({
@@ -176,6 +178,23 @@ const VoiceAssistant = () => {
     setStatus,
     setAudioState
   }), []);
+
+  // Add toast state
+  const [toast, setToast] = useState<{
+    message: string;
+    type: 'error' | 'info' | 'success';
+    visible: boolean;
+  }>({
+    message: '',
+    type: 'info',
+    visible: false
+  });
+
+  // Toast helper function
+  const showToast = (message: string, type: 'error' | 'info' | 'success' = 'info') => {
+    setToast({ message, type, visible: true });
+    setTimeout(() => setToast(prev => ({ ...prev, visible: false })), 3000);
+  };
 
   // Add helper functions at component level
   const getChipColor = (key: string) => {
@@ -307,20 +326,22 @@ const VoiceAssistant = () => {
               ...data.config
             }
           }));
+          // Update elevenlabs_enabled setting if it's an ElevenLabs update
+          if (data.tool === 'elevenlabs_tts') {
+            const newValue = data.config.is_enabled ? 'true' : 'false';
+            setSettings(prev => ({
+              ...prev,
+              elevenlabs_enabled: newValue
+            }));
+          }
           break;
         case 'tts_response':
-          if (data.audio) {
-            // Check for elevenlabs_tts config
-            const isElevenLabsEnabled = toolConfigs?.elevenlabs_tts?.is_enabled;
-            console.log('TTS Response received. ElevenLabs enabled:', isElevenLabsEnabled, 'Tool configs:', toolConfigs);
-            
-            if (isElevenLabsEnabled) {
-              console.log('Playing TTS response...');
-              const audioData = new Uint8Array(data.audio);
-              playAudioResponse(audioData);
-            } else {
-              console.log('ElevenLabs is disabled, skipping TTS');
-            }
+          if (data.audio && settings.elevenlabs_enabled === 'true') {
+            console.log('Playing TTS response...');
+            const audioData = new Uint8Array(data.audio);
+            playAudioResponse(audioData);
+          } else {
+            console.log('ElevenLabs is disabled, skipping TTS');
           }
           break;
         case 'transcription':
@@ -361,7 +382,7 @@ const VoiceAssistant = () => {
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
     }
-  }, [streamText, toolConfigs, playAudioResponse]);
+  }, [streamText, toolConfigs, playAudioResponse, handleUpdateSetting, settings]);
 
   // Define cleanupWebSocket first
   const cleanupWebSocket = useCallback(() => {
@@ -1160,12 +1181,12 @@ const VoiceAssistant = () => {
     try {
       console.log(`Setting ${toolName} enabled state to:`, isEnabled);
       
-      const response = await fetch(`/api/tool-configs/${toolName}/is_enabled`, {
+      const response = await fetch(`/api/tool-configs/${toolName}/enabled`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ value: isEnabled })
+        body: JSON.stringify({ enabled: isEnabled })
       });
 
       if (!response.ok) {
@@ -1205,8 +1226,48 @@ const VoiceAssistant = () => {
     }
   };
 
+  // Voice toggle handler with validation
+  const handleVoiceToggle = async () => {
+    // Check for required settings
+    if (!settings.elevenlabs_api_key || !settings.elevenlabs_voice_id) {
+      showToast('Please configure ElevenLabs API key and Voice ID in settings first', 'error');
+      return;
+    }
+
+    const newValue = settings.elevenlabs_enabled === 'true' ? 'false' : 'true';
+    await handleUpdateSetting('elevenlabs_enabled', newValue);
+    // Also update the tool config to keep them in sync
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'update_tool_config',
+        tool: 'elevenlabs_tts',
+        config: {
+          is_enabled: newValue === 'true'
+        }
+      }));
+    }
+  };
+
   return (
     <div className="h-screen w-full bg-[#0A0A0A] flex flex-col overflow-hidden">
+      {/* Toast Notification */}
+      <AnimatePresence>
+        {toast.visible && (
+          <motion.div
+            initial={{ opacity: 0, y: -50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -50 }}
+            className={`fixed top-4 right-4 z-50 p-4 rounded-lg shadow-lg ${
+              toast.type === 'error' ? 'bg-red-500' :
+              toast.type === 'success' ? 'bg-green-500' :
+              'bg-blue-500'
+            }`}
+          >
+            {toast.message}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Top Bar */}
       <div className="flex items-center justify-between p-4 border-b border-white/10">
         <div className="flex items-center space-x-4">
@@ -1292,6 +1353,21 @@ const VoiceAssistant = () => {
         </div>
 
         <div className="flex items-center space-x-2">
+          <button
+            onClick={handleVoiceToggle}
+            className={`p-2 rounded-xl hover:bg-white/5 transition-colors ${
+              !settings.elevenlabs_api_key || !settings.elevenlabs_voice_id
+                ? 'text-white/30 cursor-not-allowed'
+                : settings.elevenlabs_enabled === 'true'
+                  ? 'text-blue-400'
+                  : 'text-white/30'
+            }`}
+            title={!settings.elevenlabs_api_key || !settings.elevenlabs_voice_id
+              ? 'Configure ElevenLabs API key and Voice ID in settings first'
+              : `Voice is ${settings.elevenlabs_enabled === 'true' ? 'enabled' : 'disabled'}`}
+          >
+            <Volume2 className="w-5 h-5" />
+          </button>
           <button
             onClick={() => setIsSettingsPanelOpen(true)}
             className="p-2 rounded-xl hover:bg-white/5 transition-colors"

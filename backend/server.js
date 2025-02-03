@@ -528,6 +528,23 @@ wss.on('connection', (ws, req) => {
                 const strMessage = message.toString();
                 jsonData = JSON.parse(strMessage);
 
+                // Handle tool config updates
+                if (jsonData.type === 'update_tool_config') {
+                    await db.updateToolConfig(jsonData.tool, 'is_enabled', jsonData.config.is_enabled);
+                    await db.updateSetting('elevenlabs_enabled', jsonData.config.is_enabled ? 'true' : 'false');
+                    // Broadcast the update to all connected clients
+                    clients.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) {
+                            client.send(JSON.stringify({
+                                type: 'tool_config_updated',
+                                tool: jsonData.tool,
+                                config: jsonData.config
+                            }));
+                        }
+                    });
+                    return;
+                }
+
                 // Handle conversation selection
                 if (jsonData.type === 'select_conversation') {
                     currentConversationId = jsonData.conversationId;
@@ -580,7 +597,7 @@ wss.on('connection', (ws, req) => {
                     // Update conversation timestamp
                     await db.updateConversationTimestamp(currentConversationId);
 
-                    // Send AI response to client
+                    // Send LLM response to client
                     ws.send(JSON.stringify({
                         type: 'ai_response',
                         text: llmResponse
@@ -588,7 +605,6 @@ wss.on('connection', (ws, req) => {
 
                     // Get TTS response
                     const audioResponse = await getTextToSpeech(llmResponse);
-                    
                     // Only send audio response if TTS was successful
                     if (audioResponse) {
                         ws.send(JSON.stringify({
@@ -754,7 +770,6 @@ wss.on('connection', (ws, req) => {
 
                     // Get TTS response
                     const audioResponse = await getTextToSpeech(llmResponse);
-                    
                     // Only send audio response if TTS was successful
                     if (audioResponse) {
                         ws.send(JSON.stringify({
@@ -884,19 +899,21 @@ const getLLMResponse = async (userMessage, conversationId) => {
 async function getTextToSpeech(text) {
     try {
         const settings = await db.getSettings();
-        const toolConfigs = await db.getToolConfigs();
+        console.log('Checking TTS settings:', settings.elevenlabs_enabled);
         
-        // Check if ElevenLabs is enabled in tool configs
-        if (!toolConfigs.elevenlabs?.is_enabled) {
-            console.log('ElevenLabs is disabled, skipping TTS');
+        // First check if ElevenLabs is enabled in settings
+        if (settings.elevenlabs_enabled !== 'true') {
+            console.log('ElevenLabs is disabled in settings, skipping TTS');
             return null;
         }
 
+        // Then check for required credentials
         if (!settings.elevenlabs_api_key || !settings.elevenlabs_voice_id) {
             console.log('ElevenLabs settings not configured, skipping TTS');
             return null;
         }
 
+        console.log('Generating TTS response with ElevenLabs...');
         const response = await axios.post(
             `https://api.elevenlabs.io/v1/text-to-speech/${settings.elevenlabs_voice_id}`,
             {
@@ -920,7 +937,7 @@ async function getTextToSpeech(text) {
         return response.data;
     } catch (error) {
         console.error('TTS error:', error.message);
-        throw error;
+        return null;
     }
 }
 

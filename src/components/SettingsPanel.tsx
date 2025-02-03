@@ -11,6 +11,7 @@ interface Settings {
   llm_model: string;
   llm_temperature: number;
   llm_max_tokens: number;
+  elevenlabs_enabled: boolean;
 }
 
 interface SavedConfig {
@@ -832,6 +833,10 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <div className="space-y-6">
               {/* ElevenLabs Settings */}
               <div className="space-y-4">
+                <div className="flex items-center space-x-2">
+                  <Volume2 className="w-5 h-5 text-blue-400" />
+                  <h3 className="text-lg font-medium text-white">ElevenLabs TTS</h3>
+                </div>
                 <div>
                   <label className="block text-sm text-white/70 mb-1">API Key</label>
                   <input
@@ -858,7 +863,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                           setIsTestingVoice(false);
                         }
                       }}
-                      className="flex-1 p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
+                      className="w-full p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
                       placeholder="Enter voice ID"
                     />
                     {isTestingVoice && (
@@ -868,6 +873,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     )}
                   </div>
                 </div>
+                <p className="text-sm text-white/50">Configure your ElevenLabs API key and voice ID. Use the speaker toggle in the top bar to enable/disable voice responses.</p>
               </div>
             </div>
           )}
@@ -885,7 +891,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     <input
                       type="checkbox"
                       className="sr-only peer"
-                      checked={toolConfigs?.weather?.is_enabled || false}
+                      checked={Boolean(toolConfigs?.weather?.is_enabled)}
                       onChange={(e) => onSetToolEnabled('weather', e.target.checked)}
                     />
                     <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
@@ -914,7 +920,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                     <input
                       type="checkbox"
                       className="sr-only peer"
-                      checked={toolConfigs?.google_search?.is_enabled || false}
+                      checked={Boolean(toolConfigs?.google_search?.is_enabled)}
                       onChange={(e) => onSetToolEnabled('google_search', e.target.checked)}
                     />
                     <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
@@ -1039,23 +1045,13 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
           {activeTab === 'system' && (
             <div className="space-y-6">
+              {/* ElevenLabs Integration */}
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <Volume2 className="w-5 h-5 text-purple-400" />
-                    <h3 className="text-lg font-medium text-white">ElevenLabs Integration</h3>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="sr-only peer"
-                      checked={toolConfigs.elevenlabs_tts?.is_enabled || false}
-                      onChange={(e) => onSetToolEnabled('elevenlabs_tts', e.target.checked)}
-                    />
-                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
-                  </label>
+                <div className="flex items-center space-x-2">
+                  <Volume2 className="w-5 h-5 text-purple-400" />
+                  <h3 className="text-lg font-medium text-white">ElevenLabs Integration</h3>
                 </div>
-                <p className="text-sm text-white/50">Enable or disable ElevenLabs text-to-speech for AI responses</p>
+                <p className="text-sm text-white/50">Configure your ElevenLabs API key and voice ID in the Voice tab. Use the speaker toggle in the top bar to enable/disable voice responses.</p>
               </div>
             </div>
           )}

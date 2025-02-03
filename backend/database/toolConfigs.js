@@ -6,10 +6,14 @@ export const toolConfigMethods = {
         rows.forEach(row => {
             if (!configs[row.tool_name]) {
                 configs[row.tool_name] = {
-                    is_enabled: row.is_enabled
+                    is_enabled: Boolean(row.is_enabled)
                 };
             }
-            configs[row.tool_name][row.config_key] = row.config_value;
+            if (row.config_key === 'is_enabled') {
+                configs[row.tool_name].is_enabled = Boolean(row.is_enabled);
+            } else {
+                configs[row.tool_name][row.config_key] = row.config_value;
+            }
         });
         return configs;
     },

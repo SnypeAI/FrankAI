@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import sqlite3 from 'sqlite3';
 import db from './database/db.js';
 import chalk from 'chalk';
+import { ToolManager } from '../tools/toolManager.js';
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -47,26 +48,15 @@ app.use(express.json());
 // Handle preflight requests
 app.options('*', cors(corsOptions));
 
-// Handle WebSocket upgrade requests
-server.on('upgrade', (request, socket, head) => {
-    const origin = request.headers.origin;
-    if (!corsOptions.origin.includes(origin)) {
-        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-        socket.destroy();
-        return;
-    }
-});
-
-// Create WebSocket server with CORS validation and better configuration
+// Create WebSocket server
 const wss = new WebSocketServer({ 
     server,
     path: '/ws',
-    verifyClient: ({ origin, req }, callback) => {
+    verifyClient: ({ origin }, callback) => {
         const isAllowed = !origin || corsOptions.origin.includes(origin);
         callback(isAllowed);
     },
     clientTracking: true,
-    handleProtocols: () => 'json',
     perMessageDeflate: {
         zlibDeflateOptions: {
             chunkSize: 1024,
@@ -115,6 +105,10 @@ try {
     logger.error('Failed to connect to database: ' + error);
     process.exit(1);
 }
+
+// Initialize tool manager
+const toolManager = new ToolManager(db);
+await toolManager.initialize();
 
 // Load settings from database
 async function loadSettings() {
@@ -342,6 +336,174 @@ app.put('/saved-configs/:id', async (req, res) => {
   }
 });
 
+// Add tool configuration endpoints
+app.get('/api/tool-configs', async (req, res) => {
+    try {
+        const configs = await db.getToolConfigs();
+        res.json(configs);
+    } catch (error) {
+        console.error('Error fetching tool configs:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/tool-configs/:toolName/:configKey', async (req, res) => {
+    try {
+        const { toolName, configKey } = req.params;
+        const { value } = req.body;
+        await toolManager.updateToolConfig(toolName, configKey, value);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating tool config:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/tool-configs/:toolName/enabled', async (req, res) => {
+    try {
+        const { toolName } = req.params;
+        const { enabled } = req.body;
+        await toolManager.setToolEnabled(toolName, enabled);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error updating tool enabled state:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Add tool execution endpoint
+app.post('/api/execute-tool/:toolName', async (req, res) => {
+    try {
+        const { toolName } = req.params;
+        const params = req.body;
+        const result = await toolManager.executeTool(toolName, params);
+        res.json(result);
+    } catch (error) {
+        console.error('Error executing tool:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update chat completion endpoint to include tools
+app.post('/api/chat', async (req, res) => {
+    try {
+        const { messages, conversation_id } = req.body;
+        
+        // Get available tools
+        const tools = toolManager.getAvailableTools();
+        
+        // Get current settings
+        const settings = await db.getSettings();
+        
+        // Get personality
+        const personality = await db.getDefaultPersonality();
+        
+        // Prepare system message with personality and tools
+        const systemMessage = {
+            role: 'system',
+            content: personality ? personality.system_prompt : 'You are a helpful AI assistant.'
+        };
+        
+        // Make API request with tools if available
+        const apiRequestBody = {
+            model: settings.llm_model,
+            messages: [systemMessage, ...messages],
+            temperature: parseFloat(settings.llm_temperature),
+            max_tokens: parseInt(settings.llm_max_tokens),
+            ...(tools.length > 0 && { tools }),
+            tool_choice: 'auto'
+        };
+
+        const response = await fetch(settings.llm_api_endpoint + '/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(apiRequestBody)
+        });
+
+        if (!response.ok) {
+            throw new Error(`API request failed: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        
+        // Handle tool calls if present
+        if (data.choices[0].message.tool_calls) {
+            const toolCalls = data.choices[0].message.tool_calls;
+            const toolResults = await Promise.all(toolCalls.map(async (toolCall) => {
+                try {
+                    const result = await toolManager.executeTool(
+                        toolCall.function.name,
+                        JSON.parse(toolCall.function.arguments)
+                    );
+                    return {
+                        tool_call_id: toolCall.id,
+                        role: 'tool',
+                        content: JSON.stringify(result)
+                    };
+                } catch (error) {
+                    console.error('Tool execution error:', error);
+                    return {
+                        tool_call_id: toolCall.id,
+                        role: 'tool',
+                        content: JSON.stringify({ error: error.message })
+                    };
+                }
+            }));
+
+            // Add tool calls and results to conversation
+            if (conversation_id) {
+                await db.addMessage(conversation_id, 'assistant', JSON.stringify(data.choices[0].message));
+                for (const result of toolResults) {
+                    await db.addMessage(conversation_id, 'tool', result.content);
+                }
+            }
+
+            // Get final response with tool results
+            const finalResponse = await fetch(settings.llm_api_endpoint + '/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: settings.llm_model,
+                    messages: [
+                        systemMessage,
+                        ...messages,
+                        data.choices[0].message,
+                        ...toolResults
+                    ],
+                    temperature: parseFloat(settings.llm_temperature),
+                    max_tokens: parseInt(settings.llm_max_tokens)
+                })
+            });
+
+            if (!finalResponse.ok) {
+                throw new Error(`API request failed: ${finalResponse.statusText}`);
+            }
+
+            const finalData = await finalResponse.json();
+            
+            // Save final response to conversation
+            if (conversation_id) {
+                await db.addMessage(conversation_id, 'assistant', finalData.choices[0].message.content);
+            }
+
+            res.json(finalData);
+        } else {
+            // No tool calls, just save and return the response
+            if (conversation_id) {
+                await db.addMessage(conversation_id, 'assistant', data.choices[0].message.content);
+            }
+            res.json(data);
+        }
+    } catch (error) {
+        console.error('Error in chat endpoint:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Connection handling
 wss.on('connection', (ws, req) => {
     logger.info(`Client connected from ${req.socket.remoteAddress}`);
@@ -427,8 +589,13 @@ wss.on('connection', (ws, req) => {
                     // Get TTS response
                     const audioResponse = await getTextToSpeech(llmResponse);
                     
-                    // Send audio response to client
-                    ws.send(Buffer.from(audioResponse));
+                    // Only send audio response if TTS was successful
+                    if (audioResponse) {
+                        ws.send(JSON.stringify({
+                            type: 'tts_response',
+                            audio: Array.from(audioResponse)
+                        }));
+                    }
                     return;
                 }
 
@@ -458,6 +625,57 @@ wss.on('connection', (ws, req) => {
                     ws.send(JSON.stringify({
                         type: 'status',
                         status: 'Debug mode: ' + jsonData.action
+                    }));
+                    return;
+                }
+
+                // Handle saved configs
+                if (jsonData.type === 'get_saved_configs') {
+                    const configs = await db.getSavedConfigs();
+                    ws.send(JSON.stringify({
+                        type: 'saved_configs',
+                        configs
+                    }));
+                    return;
+                }
+
+                // Handle personalities
+                if (jsonData.type === 'get_personalities') {
+                    const personalities = await db.getPersonalities();
+                    ws.send(JSON.stringify({
+                        type: 'personalities',
+                        personalities
+                    }));
+                    return;
+                }
+
+                if (jsonData.type === 'add_personality') {
+                    const personality = await db.addPersonality({
+                        name: jsonData.name,
+                        system_prompt: jsonData.system_prompt
+                    });
+                    ws.send(JSON.stringify({
+                        type: 'personality_added',
+                        personality
+                    }));
+                    return;
+                }
+
+                if (jsonData.type === 'set_default_personality') {
+                    const personality = await db.setDefaultPersonality(jsonData.id);
+                    ws.send(JSON.stringify({
+                        type: 'personality_default_set',
+                        personality
+                    }));
+                    return;
+                }
+
+                if (jsonData.type === 'delete_personality') {
+                    const success = await db.deletePersonality(jsonData.id);
+                    ws.send(JSON.stringify({
+                        type: 'personality_deleted',
+                        success,
+                        id: jsonData.id
                     }));
                     return;
                 }
@@ -537,8 +755,13 @@ wss.on('connection', (ws, req) => {
                     // Get TTS response
                     const audioResponse = await getTextToSpeech(llmResponse);
                     
-                    // Send audio response to client
-                    ws.send(Buffer.from(audioResponse));
+                    // Only send audio response if TTS was successful
+                    if (audioResponse) {
+                        ws.send(JSON.stringify({
+                            type: 'tts_response',
+                            audio: Array.from(audioResponse)
+                        }));
+                    }
                 }
             }
         } catch (error) {
@@ -616,68 +839,59 @@ server.on('error', (error) => {
     logger.error('HTTP server error: ' + error);
 });
 
-// Helper function to get LLM response
-async function getLLMResponse(text, conversationId) {
+// Get and save AI response
+const getLLMResponse = async (userMessage, conversationId) => {
     try {
+        // Get conversation history for context
+        const messages = await db.getMessagesForContext(conversationId);
         const settings = await db.getSettings();
-        console.log('Current settings:', settings); // Debug log
+        const defaultPersonality = await db.getDefaultPersonality();
 
-        if (!settings.llm_api_endpoint) {
-            console.error('LLM API endpoint missing from settings:', settings);
-            throw new Error('LLM API endpoint not configured');
-        }
-
-        // Ensure the endpoint ends with a slash if it doesn't already
-        const baseUrl = settings.llm_api_endpoint.endsWith('/')
-            ? settings.llm_api_endpoint
-            : settings.llm_api_endpoint + '/';
-        
-        console.log('Using LLM endpoint:', baseUrl); // Debug log
-        
-        // Get previous messages from the conversation for context
-        const previousMessages = await db.getMessagesForContext(conversationId);
-        
-        // Build the messages array with conversation history
-        const messages = [
-            { role: "system", content: "You are a helpful AI assistant. Keep responses concise and natural." },
-            ...previousMessages.map(msg => ({
-                role: msg.role === 'user' ? 'user' : 'assistant',
+        // Prepare messages array for API call
+        const apiMessages = [
+            // Add system message if there's a default personality
+            ...(defaultPersonality ? [{ role: 'system', content: defaultPersonality.system_prompt }] : []),
+            // Add conversation history
+            ...messages.map(msg => ({
+                role: msg.role,
                 content: msg.content
             })),
-            { role: "user", content: text }
+            // Add current user message
+            { role: 'user', content: userMessage }
         ];
 
-        console.log('Sending request to LLM with config:', {
-            endpoint: baseUrl + 'v1/chat/completions',
+        // Make API call
+        const response = await axios.post(settings.llm_api_endpoint + '/v1/chat/completions', {
             model: settings.llm_model,
-            temperature: settings.llm_temperature,
-            max_tokens: settings.llm_max_tokens
-        }); // Debug log
-
-        // Use the chat completions endpoint with the full URL
-        const response = await axios.post(`${baseUrl}v1/chat/completions`, {
-            messages,
-            model: settings.llm_model,
-            temperature: settings.llm_temperature ? parseFloat(settings.llm_temperature) : 0.7,
-            max_tokens: settings.llm_max_tokens ? parseInt(settings.llm_max_tokens) : 1000
+            messages: apiMessages,
+            temperature: parseFloat(settings.llm_temperature),
+            max_tokens: parseInt(settings.llm_max_tokens),
+            stream: false
+        }, {
+            headers: {
+                'Content-Type': 'application/json'
+            }
         });
 
-        // Extract the response text from the API response
-        if (response.data && response.data.choices && response.data.choices[0] && response.data.choices[0].message) {
-            return response.data.choices[0].message.content;
-        }
-        
-        throw new Error('Invalid response format from LLM API');
+        return response.data.choices[0].message.content;
     } catch (error) {
-        console.error('LLM error:', error.message);
-        throw error;
+        console.error('Error getting LLM response:', error);
+        return 'Sorry, I encountered an error while processing your request.';
     }
-}
+};
 
 // Helper function to get TTS response
 async function getTextToSpeech(text) {
     try {
         const settings = await db.getSettings();
+        const toolConfigs = await db.getToolConfigs();
+        
+        // Check if ElevenLabs is enabled in tool configs
+        if (!toolConfigs.elevenlabs?.is_enabled) {
+            console.log('ElevenLabs is disabled, skipping TTS');
+            return null;
+        }
+
         if (!settings.elevenlabs_api_key || !settings.elevenlabs_voice_id) {
             console.log('ElevenLabs settings not configured, skipping TTS');
             return null;

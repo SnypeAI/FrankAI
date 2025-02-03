@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { Mic, MicOff, Menu, X, MessageSquare, Bug, Play, RefreshCw, Wand2, Volume2, Settings2, Keyboard, Send, Ear } from 'lucide-react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import { Mic, MicOff, Menu, X, MessageSquare, Bug, Play, RefreshCw, Wand2, Volume2, Settings2, Keyboard, Send, Ear, CheckCircle2, Brain } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { createPortal } from 'react-dom';
 import DebugPanel from './DebugPanel';
@@ -74,6 +74,15 @@ interface SavedConfig {
   created_at: string;
 }
 
+interface Personality {
+  id: number;
+  name: string;
+  system_prompt: string;
+  is_default: boolean;
+  is_builtin: boolean;
+  created_at: string;
+}
+
 // Input mode types
 type InputMode = 'text' | 'push-to-talk' | 'trigger-word';
 
@@ -81,6 +90,8 @@ const VoiceAssistant = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [currentConversation, setCurrentConversation] = useState<number | null>(null);
+  const [personalities, setPersonalities] = useState<Personality[]>([]);
+  const [currentPersonality, setCurrentPersonality] = useState<Personality | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSettingsPanelOpen, setIsSettingsPanelOpen] = useState(false);
   const [settings, setSettings] = useState<Settings>({
@@ -139,13 +150,32 @@ const VoiceAssistant = () => {
 
   // Add new state for keyboard mode
   const [isKeyboardMode, setIsKeyboardMode] = useState(false);
-  const [textInput, setTextInput] = useState('');
+  const [textInput, setTextInput] = useState<string>('');
 
   // Add new state for voice mode
   const [isVoiceMode, setIsVoiceMode] = useState(false);
 
   // Add new state for input mode
   const [inputMode, setInputMode] = useState<InputMode>('text');
+
+  // Add new state for personality selector
+  const [showPersonalitySelector, setShowPersonalitySelector] = useState(false);
+
+  // Add click outside handler for personality selector
+  const personalitySelectorRef = useRef<HTMLDivElement>(null);
+
+  // Add new state for tool configs
+  const [toolConfigs, setToolConfigs] = useState<Record<string, any>>({});
+
+  // Memoize state setters to prevent unnecessary re-renders
+  const memoizedSetters = useMemo(() => ({
+    setConversations,
+    setSettings,
+    setSavedConfigs,
+    setToolConfigs,
+    setStatus,
+    setAudioState
+  }), []);
 
   // Add helper functions at component level
   const getChipColor = (key: string) => {
@@ -261,206 +291,202 @@ const VoiceAssistant = () => {
     return () => clearInterval(interval);
   }, []);
 
-  const connectWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
+  // WebSocket message handler
+  const handleWebSocketMessage = useCallback(async (event: MessageEvent) => {
+    try {
+      const data = JSON.parse(event.data);
+      console.log('Received WebSocket message:', data);
+      
+      switch (data.type) {
+        case 'tool_config_updated':
+          console.log('Tool config updated:', data);
+          setToolConfigs(prev => ({
+            ...prev,
+            [data.tool]: {
+              ...prev[data.tool],
+              ...data.config
+            }
+          }));
+          break;
+        case 'tts_response':
+          if (data.audio) {
+            // Check for elevenlabs_tts config
+            const isElevenLabsEnabled = toolConfigs?.elevenlabs_tts?.is_enabled;
+            console.log('TTS Response received. ElevenLabs enabled:', isElevenLabsEnabled, 'Tool configs:', toolConfigs);
+            
+            if (isElevenLabsEnabled) {
+              console.log('Playing TTS response...');
+              const audioData = new Uint8Array(data.audio);
+              playAudioResponse(audioData);
+            } else {
+              console.log('ElevenLabs is disabled, skipping TTS');
+            }
+          }
+          break;
+        case 'transcription':
+          setMessages(prev => [...prev, { id: Date.now(), text: data.text, isAI: false, isStreaming: false }]);
+          break;
+        case 'ai_response':
+          const messageId = Date.now();
+          setMessages(prev => [...prev, { id: messageId, text: '', isAI: true, isStreaming: true }]);
+          streamText(data.text, messageId);
+          break;
+        case 'error':
+          console.error('WebSocket error:', data.error);
+          setStatus(`Error: ${data.error}`);
+          break;
+        case 'status':
+          setStatus(data.status);
+          break;
+        case 'connection_established':
+          setAudioState(prev => ({ ...prev, wsConnected: true }));
+          break;
+        case 'new_conversation':
+          setCurrentConversation(data.conversation.id);
+          setConversations(prev => [data.conversation, ...prev]);
+          break;
+        case 'personalities':
+          setPersonalities(data.personalities);
+          const defaultPersonality = data.personalities.find((p: Personality) => p.is_default);
+          setCurrentPersonality(defaultPersonality || null);
+          break;
+        case 'personality_default_set':
+          setPersonalities(prev => prev.map(p => ({
+            ...p,
+            is_default: p.id === data.personality.id
+          })));
+          setCurrentPersonality(data.personality);
+          break;
+      }
+    } catch (error) {
+      console.error('Error handling WebSocket message:', error);
+    }
+  }, [streamText, toolConfigs, playAudioResponse]);
+
+  // Define cleanupWebSocket first
+  const cleanupWebSocket = useCallback(() => {
+    console.log('Cleaning up WebSocket connection...');
+    
+    if (wsReconnectTimeout.current) {
+      console.log('Clearing reconnection timeout');
+      clearTimeout(wsReconnectTimeout.current);
+      wsReconnectTimeout.current = undefined;
     }
 
+    if (wsRef.current) {
+      console.log('Closing existing WebSocket connection');
+      wsRef.current.onclose = null; // Remove onclose handler first
+      wsRef.current.onerror = null; // Remove error handler
+      wsRef.current.onmessage = null; // Remove message handler
+      wsRef.current.onopen = null; // Remove open handler
+      
+      if (wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close(1000, 'Intentional cleanup');
+      }
+      wsRef.current = null;
+    }
+
+    connectionAttempts.current = 0;
+  }, []);
+
+  // Update the WebSocket connection setup with proper dependencies
+  const connectWebSocket = useCallback(() => {
+    // Clean up any existing connection first
+    cleanupWebSocket();
+
+    console.log('Establishing new WebSocket connection...');
     const wsUrl = 'ws://localhost:3001/ws';
     wsRef.current = new WebSocket(wsUrl);
 
     wsRef.current.onopen = () => {
-      console.log('WebSocket connected');
+      console.log('WebSocket connected successfully');
       connectionAttempts.current = 0;
-      setAudioState(prev => ({ ...prev, wsConnected: true, error: null }));
+      memoizedSetters.setAudioState(prev => ({ ...prev, wsConnected: true, error: null }));
+      
+      // Request personalities only after successful connection
+      wsRef.current?.send(JSON.stringify({ type: 'get_personalities' }));
     };
 
     wsRef.current.onclose = (event) => {
-      console.log('WebSocket closed with code:', event.code);
-      setAudioState(prev => ({ ...prev, wsConnected: false, isListening: false, error: event.reason ? `Connection closed: ${event.reason}` : 'Connection closed' }));
+      console.log('WebSocket closed with code:', event.code, 'reason:', event.reason);
+      memoizedSetters.setAudioState(prev => ({ ...prev, wsConnected: false, isListening: false }));
       
-      // Only attempt to reconnect if not a normal closure
-      if (event.code !== 1000 && event.code !== 1001 && connectionAttempts.current < MAX_RECONNECT_ATTEMPTS) {
-        console.log(`Attempting to reconnect (${connectionAttempts.current + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
-        wsReconnectTimeout.current = setTimeout(connectWebSocket, 2000);
+      if (event.code !== 1000 && 
+          event.code !== 1001 && 
+          connectionAttempts.current < MAX_RECONNECT_ATTEMPTS) {
+        connectionAttempts.current += 1;
+        const backoffTime = Math.min(1000 * Math.pow(2, connectionAttempts.current), 10000);
+        console.log(`Scheduling reconnection attempt ${connectionAttempts.current}/${MAX_RECONNECT_ATTEMPTS} in ${backoffTime}ms`);
+        wsReconnectTimeout.current = setTimeout(connectWebSocket, backoffTime);
       }
     };
 
-    wsRef.current.onerror = () => {
-      setAudioState(prev => ({ ...prev, error: 'Connection error. Please check if the server is running.', wsConnected: false }));
+    wsRef.current.onerror = (error) => {
+      console.error('WebSocket error occurred:', error);
+      memoizedSetters.setAudioState(prev => ({ 
+        ...prev, 
+        error: 'Connection error. Please check if the server is running.',
+        wsConnected: false 
+      }));
     };
 
-    wsRef.current.onmessage = async (event) => {
-      if (event.data instanceof Blob) {
-        try {
-          const buffer = await event.data.arrayBuffer();
-          const audioData = new Uint8Array(buffer);
-          if (isDebugPanelOpen) {
-            setDebugState(prev => ({ 
-              ...prev, 
-              lastTTSAudio: audioData,
-              debugStatus: 'Audio response received'
-            }));
-          }
-          await playAudioResponse(audioData);
-        } catch (error) {
-          console.error('Error playing audio response:', error);
-          if (!isDebugPanelOpen) {
-            setStatus('Failed to play audio response');
-          }
-        }
-      } else if (typeof event.data === 'string') {
-        try {
-          const data = JSON.parse(event.data);
-          
-          // Handle debug-specific messages
-          if (data.type === 'debug') {
-            switch (data.action) {
-              case 'transcription':
-                setDebugState(prev => ({
-                  ...prev,
-                  lastTranscription: data.text,
-                  debugStatus: 'Transcription complete',
-                  isRecordingTest: false
-                }));
-                break;
+    wsRef.current.onmessage = handleWebSocketMessage;
+  }, [handleWebSocketMessage, memoizedSetters, cleanupWebSocket]);
 
-              case 'ai_response':
-                if (!data.text) {
-                  console.warn('Received empty AI response');
-                  return;
-                }
-                const messageId = Date.now();
-                setMessages(prev => [...prev, {
-                  id: messageId,
-                  text: '',
-                  isAI: true,
-                  isStreaming: true
-                }]);
-                streamText(data.text, messageId);
-                break;
-
-              case 'error':
-                if (data.error === 'Unknown error') {
-                  console.error('Received error message without details');
-                } else {
-                  console.error('Server error:', data.error);
-                }
-                setAudioState(prev => ({ 
-                  ...prev, 
-                  error: data.error,
-                  isListening: false 
-                }));
-                break;
-
-              case 'status':
-                if (data.status) {
-                  setStatus(data.status);
-                }
-                break;
-
-              default:
-                console.warn('Received unknown debug message type:', data.action);
-            }
-          } else {
-            // Handle text messages
-            const safeData = {
-              type: String(data.type || ''),
-              text: String(data.text || ''),
-              error: String(data.error || 'Unknown error'),
-              status: String(data.status || '')
-            };
-
-            // Handle different message types
-            switch (safeData.type) {
-              case 'transcription':
-                if (!safeData.text) {
-                  console.warn('Received empty transcription');
-                  return;
-                }
-                setMessages(prev => [...prev, {
-                  id: Date.now(),
-                  text: safeData.text,
-                  isAI: false,
-                  isStreaming: false
-                }]);
-                break;
-
-              case 'ai_response':
-                if (!safeData.text) {
-                  console.warn('Received empty AI response');
-                  return;
-                }
-                const messageId = Date.now();
-                setMessages(prev => [...prev, {
-                  id: messageId,
-                  text: '',
-                  isAI: true,
-                  isStreaming: true
-                }]);
-                streamText(safeData.text, messageId);
-                break;
-
-              case 'error':
-                if (safeData.error === 'Unknown error') {
-                  console.error('Received error message without details');
-                } else {
-                  console.error('Server error:', safeData.error);
-                }
-                setAudioState(prev => ({ 
-                  ...prev, 
-                  error: safeData.error,
-                  isListening: false 
-                }));
-                break;
-
-              case 'status':
-                if (safeData.status) {
-                  setStatus(safeData.status);
-                }
-                break;
-
-              default:
-                console.warn('Received unknown message type:', safeData.type);
-            }
-          }
-        } catch (error) {
-          console.error('Error processing WebSocket message:', error);
-          setAudioState(prev => ({ 
-            ...prev, 
-            error: error instanceof Error ? error.message : 'Failed to process server message',
-            isListening: false
-          }));
-        }
-      }
-    };
-  }, [streamText, isDebugPanelOpen]);
-
-  // Add cleanup function for WebSocket
-  const cleanupWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Cleanup'); // Use code 1000 for normal closure
-      wsRef.current = null;
-    }
-    if (wsReconnectTimeout.current) {
-      clearTimeout(wsReconnectTimeout.current);
-    }
-  }, []);
-
-  // Update the useEffect for WebSocket connection
+  // Load initial data
   useEffect(() => {
-    connectWebSocket();
-    return () => {
-      cleanupWebSocket();
-    };
-  }, [connectWebSocket, cleanupWebSocket]);
+    let mounted = true;
 
-  // Add handler for manual reconnection
-  const handleReconnectWebSocket = useCallback(() => {
-    cleanupWebSocket();
-    connectionAttempts.current = 0; // Reset connection attempts
-    connectWebSocket();
-  }, [cleanupWebSocket, connectWebSocket]);
+    const loadInitialData = async () => {
+      try {
+        console.log('Loading initial data...');
+        const [conversationsRes, settingsRes, configsRes, toolConfigsRes] = await Promise.all([
+          fetch('http://localhost:3001/conversations'),
+          fetch('http://localhost:3001/settings'),
+          fetch('http://localhost:3001/saved-configs'),
+          fetch('/api/tool-configs')
+        ]);
+
+        if (!mounted) return;
+
+        if (!conversationsRes.ok) throw new Error('Failed to fetch conversations');
+        if (!settingsRes.ok) throw new Error('Failed to fetch settings');
+        if (!configsRes.ok) throw new Error('Failed to fetch saved configs');
+        if (!toolConfigsRes.ok) throw new Error('Failed to fetch tool configs');
+
+        const [conversations, settings, configs, toolConfigs] = await Promise.all([
+          conversationsRes.json(),
+          settingsRes.json(),
+          configsRes.json(),
+          toolConfigsRes.json()
+        ]);
+
+        if (!mounted) return;
+
+        console.log('Setting initial data...');
+        console.log('Tool configs:', toolConfigs);
+        setConversations(conversations);
+        setSettings(settings);
+        setSavedConfigs(configs);
+        setToolConfigs(toolConfigs);
+
+        // Only after loading initial data, establish WebSocket connection
+        console.log('Initial data loaded, connecting WebSocket...');
+        connectWebSocket();
+      } catch (error) {
+        console.error('Error loading initial data:', error);
+        if (mounted) {
+          setStatus('Error loading initial data. Please refresh the page.');
+        }
+      }
+    };
+
+    loadInitialData();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const isError = (error: unknown): error is Error => {
     return error instanceof Error;
@@ -590,21 +616,36 @@ const VoiceAssistant = () => {
   // Load conversation messages when selecting a conversation
   useEffect(() => {
     const loadMessages = async () => {
-      if (currentConversation) {
-        try {
-          const response = await fetch(`http://localhost:8000/conversations/${currentConversation}/messages`);
-          const data = await response.json();
-          setMessages(data.map((msg: any) => ({
-            id: msg.id,
-            text: msg.text,
-            isAI: msg.is_ai,
-            isStreaming: false
-          })));
-        } catch (error) {
-          console.error('Error loading messages:', error);
+      if (!currentConversation) return;
+
+      try {
+        const response = await fetch(`http://localhost:3001/conversations/${currentConversation}/messages`);
+        if (!response.ok) {
+          if (response.status === 404) {
+            setStatus('Conversation not found.');
+            setCurrentConversation(null);
+            return;
+          }
+          throw new Error(`Failed to fetch messages: ${response.statusText}`);
         }
+        
+        const data = await response.json();
+        
+        // Check if data is an array, if not, use messages property or empty array
+        const messagesArray = Array.isArray(data) ? data : (data.messages || []);
+        
+        setMessages(messagesArray.map((msg: any) => ({
+          id: msg.id || Date.now(),
+          text: msg.text || '',
+          isAI: msg.is_ai || false,
+          isStreaming: false
+        })));
+      } catch (error) {
+        console.error('Error loading messages:', error);
+        setStatus('Error loading messages. Please try again.');
       }
     };
+
     loadMessages();
   }, [currentConversation]);
 
@@ -1011,43 +1052,6 @@ const VoiceAssistant = () => {
     }
   };
 
-  // Add to your useEffect for initial loading
-  useEffect(() => {
-    const loadInitialData = async () => {
-      try {
-        // Load saved configs
-        const configsResponse = await fetch('http://localhost:3001/saved-configs');
-        if (configsResponse.ok) {
-          const configs = await configsResponse.json();
-          setSavedConfigs(configs);
-          
-          // Load default config if exists
-          const defaultConfigResponse = await fetch('http://localhost:3001/saved-configs/default');
-          if (defaultConfigResponse.ok) {
-            const defaultConfig = await defaultConfigResponse.json();
-            if (defaultConfig) { // Only apply settings if a default config exists
-              // Apply default config settings
-              await handleUpdateSetting('llm_api_endpoint', defaultConfig.endpoint);
-              await handleUpdateSetting('llm_model', defaultConfig.model);
-              await handleUpdateSetting('llm_temperature', defaultConfig.temperature);
-              await handleUpdateSetting('llm_max_tokens', defaultConfig.max_tokens);
-              if (defaultConfig.elevenlabs_api_key) {
-                await handleUpdateSetting('elevenlabs_api_key', defaultConfig.elevenlabs_api_key);
-              }
-              if (defaultConfig.elevenlabs_voice_id) {
-                await handleUpdateSetting('elevenlabs_voice_id', defaultConfig.elevenlabs_voice_id);
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Error loading initial data:', error);
-      }
-    };
-
-    loadInitialData();
-  }, []);
-
   // Add handler for setting default config
   const handleSetDefaultConfig = async (id: number) => {
     try {
@@ -1100,34 +1104,206 @@ const VoiceAssistant = () => {
     }
   };
 
+  // Add click outside handler for personality selector
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (personalitySelectorRef.current && !personalitySelectorRef.current.contains(event.target as Node)) {
+        setShowPersonalitySelector(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, []);
+
+  // Add tool-related functions
+  const handleUpdateToolConfig = async (toolName: string, configKey: string, configValue: string) => {
+    try {
+      const response = await fetch(`/api/tool-configs/${toolName}/${configKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ value: configValue })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update tool config');
+      }
+
+      setToolConfigs(prev => ({
+        ...prev,
+        [toolName]: {
+          ...prev[toolName],
+          [configKey]: configValue
+        }
+      }));
+
+      // Send updated tool config to WebSocket server
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'update_tool_config',
+          tool: toolName,
+          config: {
+            [configKey]: configValue
+          }
+        }));
+      }
+    } catch (error) {
+      console.error('Error updating tool config:', error);
+    }
+  };
+
+  const handleSetToolEnabled = async (toolName: string, isEnabled: boolean) => {
+    try {
+      console.log(`Setting ${toolName} enabled state to:`, isEnabled);
+      
+      const response = await fetch(`/api/tool-configs/${toolName}/is_enabled`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ value: isEnabled })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to update ${toolName} enabled state: ${response.statusText}`);
+      }
+
+      const updatedConfig = await response.json();
+      console.log(`Updated ${toolName} config:`, updatedConfig);
+
+      setToolConfigs(prev => ({
+        ...prev,
+        [toolName]: {
+          ...prev[toolName],
+          is_enabled: isEnabled
+        }
+      }));
+
+      // Notify WebSocket of the change
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'update_tool_config',
+          tool: toolName,
+          config: {
+            is_enabled: isEnabled
+          }
+        }));
+      }
+    } catch (error) {
+      console.error(`Error updating ${toolName} enabled state:`, error);
+      // Revert the toggle if the update failed
+      setToolConfigs(prev => ({
+        ...prev,
+        [toolName]: {
+          ...prev[toolName]
+        }
+      }));
+    }
+  };
+
   return (
     <div className="h-screen w-full bg-[#0A0A0A] flex flex-col overflow-hidden">
-      {/* Top Navigation Bar - Fixed */}
-      <div className="w-full bg-[#1A1A1A] border-b border-white/5 flex-none">
-        <div className="w-full px-6 py-3 flex justify-between items-center">
-          <div className="flex items-center">
-            <button
-              onClick={() => setIsSidebarOpen(true)}
-              className="p-2 rounded-xl hover:bg-white/5 transition-colors"
-            >
-              <Menu className="w-5 h-5 text-white/70" />
-            </button>
-          </div>
-
+      {/* Top Bar */}
+      <div className="flex items-center justify-between p-4 border-b border-white/10">
+        <div className="flex items-center space-x-4">
+          <button
+            onClick={() => setIsSidebarOpen(true)}
+            className="p-2 rounded-xl hover:bg-white/5 transition-colors"
+          >
+            <Menu className="w-5 h-5 text-white/70" />
+          </button>
           <div className="flex items-center space-x-2">
+            {/* Input Mode Toggle */}
             <button
-              onClick={() => setIsSettingsPanelOpen(true)}
+              onClick={() => setInputMode(prev => prev === 'text' ? 'push-to-talk' : 'text')}
               className="p-2 rounded-xl hover:bg-white/5 transition-colors"
             >
-              <Settings2 className="w-5 h-5 text-white/70" />
+              {inputMode === 'text' ? (
+                <Keyboard className="w-5 h-5 text-white/70" />
+              ) : (
+                <Mic className="w-5 h-5 text-white/70" />
+              )}
             </button>
-            <button
-              onClick={() => setIsDebugPanelOpen(true)}
-              className="p-2 rounded-xl hover:bg-white/5 transition-colors"
-            >
-              <Bug className="w-5 h-5 text-white/70" />
-            </button>
+            {/* Personality Selector */}
+            <div className="relative" ref={personalitySelectorRef}>
+              <button
+                onClick={() => setShowPersonalitySelector(prev => !prev)}
+                className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+              >
+                <Brain className="w-4 h-4 text-white/70" />
+                <span className="text-sm text-white/90">
+                  {currentPersonality?.name || 'Select Personality'}
+                </span>
+                {currentPersonality?.is_builtin && (
+                  <span className="px-1.5 py-0.5 text-xs rounded-full bg-purple-500/20 text-purple-400">
+                    Built-in
+                  </span>
+                )}
+              </button>
+              {/* Personality Dropdown */}
+              <AnimatePresence>
+                {showPersonalitySelector && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="absolute top-full left-0 mt-2 w-64 bg-[#1A1A1A] border border-white/10 rounded-lg shadow-xl z-50"
+                  >
+                    <div className="p-2 space-y-1">
+                      {personalities.map((personality) => (
+                        <button
+                          key={personality.id}
+                          onClick={() => {
+                            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                              wsRef.current.send(JSON.stringify({
+                                type: 'set_default_personality',
+                                id: personality.id
+                              }));
+                            }
+                            setShowPersonalitySelector(false);
+                          }}
+                          className="flex items-center justify-between w-full px-3 py-2 rounded-lg hover:bg-white/5 transition-colors"
+                        >
+                          <div className="flex items-center space-x-2">
+                            <span className="text-sm text-white/90">{personality.name}</span>
+                            {personality.is_builtin && (
+                              <span className="px-1.5 py-0.5 text-xs rounded-full bg-purple-500/20 text-purple-400">
+                                Built-in
+                              </span>
+                            )}
+                          </div>
+                          {personality.is_default && (
+                            <div className="text-green-500">
+                              <CheckCircle2 className="w-4 h-4" />
+                            </div>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
+        </div>
+
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={() => setIsSettingsPanelOpen(true)}
+            className="p-2 rounded-xl hover:bg-white/5 transition-colors"
+          >
+            <Settings2 className="w-5 h-5 text-white/70" />
+          </button>
+          <button
+            onClick={() => setIsDebugPanelOpen(true)}
+            className="p-2 rounded-xl hover:bg-white/5 transition-colors"
+          >
+            <Bug className="w-5 h-5 text-white/70" />
+          </button>
         </div>
       </div>
 
@@ -1366,7 +1542,7 @@ const VoiceAssistant = () => {
             testTranscription={testTranscription}
             testLLMConnection={testLLMConnection}
             testTTSConnection={testTTSConnection}
-            connectWebSocket={handleReconnectWebSocket}
+            connectWebSocket={connectWebSocket}
             playAudioResponse={playAudioResponse}
           />
         )}
@@ -1389,6 +1565,9 @@ const VoiceAssistant = () => {
             availableModels={availableModels}
             isLoadingModels={isLoadingModels}
             onFetchModels={fetchModels}
+            toolConfigs={toolConfigs}
+            onUpdateToolConfig={handleUpdateToolConfig}
+            onSetToolEnabled={handleSetToolEnabled}
           />
         )}
       </AnimatePresence>

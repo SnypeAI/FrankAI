@@ -1,6 +1,7 @@
 import sqlite3 from 'sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { toolConfigMethods } from './toolConfigs.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,6 +10,8 @@ class Database {
     constructor() {
         this.db = new sqlite3.Database(path.join(__dirname, 'Frank.db'));
         this.init();
+        // Mix in tool configuration methods
+        Object.assign(this, toolConfigMethods);
     }
 
     async init() {
@@ -47,6 +50,23 @@ class Database {
                     )
                 `);
 
+                // Create tool_configs table
+                this.db.run(`
+                    CREATE TABLE IF NOT EXISTS tool_configs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tool_name TEXT NOT NULL,
+                        config_key TEXT NOT NULL,
+                        config_value TEXT,
+                        is_enabled BOOLEAN DEFAULT 1,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(tool_name, config_key)
+                    )
+                `, (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+
                 // Create saved_configs table if it doesn't exist
                 this.db.run(`
                     CREATE TABLE IF NOT EXISTS saved_configs (
@@ -63,7 +83,106 @@ class Database {
                     )
                 `, (err) => {
                     if (err) reject(err);
-                    else resolve();
+                    else {
+                        // Create personalities table
+                        this.db.run(`
+                            CREATE TABLE IF NOT EXISTS personalities (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                name TEXT NOT NULL UNIQUE,
+                                system_prompt TEXT NOT NULL,
+                                is_default BOOLEAN DEFAULT 0,
+                                is_builtin BOOLEAN DEFAULT 0,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                            )
+                        `, async (err) => {
+                            if (err) {
+                                console.error('Error creating personalities table:', err);
+                                reject(err);
+                            } else {
+                                try {
+                                    // Insert default personalities if they don't exist
+                                    const defaultPersonalities = [
+                                        {
+                                            name: 'Normal',
+                                            system_prompt: 'You are a helpful AI assistant.',
+                                            is_builtin: 1,
+                                            is_default: 1
+                                        },
+                                        {
+                                            name: 'Concise',
+                                            system_prompt: 'You are a helpful AI assistant. Be concise and to the point.',
+                                            is_builtin: 1
+                                        },
+                                        {
+                                            name: 'Formal',
+                                            system_prompt: 'You are a helpful AI assistant. Maintain a formal and professional tone.',
+                                            is_builtin: 1
+                                        },
+                                        {
+                                            name: 'Sassy',
+                                            system_prompt: 'You are a helpful but sassy AI assistant with attitude.',
+                                            is_builtin: 1
+                                        },
+                                        {
+                                            name: 'Pirate',
+                                            system_prompt: 'You are a helpful AI assistant who speaks like a pirate. Use pirate slang and terminology.',
+                                            is_builtin: 1
+                                        }
+                                    ];
+
+                                    await new Promise((resolve, reject) => {
+                                        this.db.run('BEGIN TRANSACTION', async (err) => {
+                                            if (err) {
+                                                console.error('Error starting transaction:', err);
+                                                reject(err);
+                                                return;
+                                            }
+
+                                            try {
+                                                for (const personality of defaultPersonalities) {
+                                                    await new Promise((res, rej) => {
+                                                        this.db.run(
+                                                            `INSERT INTO personalities (name, system_prompt, is_builtin, is_default) 
+                                                             VALUES (?, ?, ?, ?)
+                                                             ON CONFLICT(name) DO UPDATE SET
+                                                             system_prompt = excluded.system_prompt,
+                                                             is_builtin = excluded.is_builtin,
+                                                             is_default = excluded.is_default
+                                                             WHERE is_builtin = 1`,
+                                                            [personality.name, personality.system_prompt, personality.is_builtin, personality.is_default || 0],
+                                                            (err) => {
+                                                                if (err) rej(err);
+                                                                else res();
+                                                            }
+                                                        );
+                                                    });
+                                                }
+
+                                                this.db.run('COMMIT', (err) => {
+                                                    if (err) {
+                                                        console.error('Error committing transaction:', err);
+                                                        reject(err);
+                                                    } else {
+                                                        resolve();
+                                                    }
+                                                });
+                                            } catch (error) {
+                                                this.db.run('ROLLBACK', () => {
+                                                    console.error('Transaction rolled back:', error);
+                                                    reject(error);
+                                                });
+                                            }
+                                        });
+                                    });
+
+                                    resolve();
+                                } catch (error) {
+                                    console.error('Error in personalities initialization:', error);
+                                    reject(error);
+                                }
+                            }
+                        });
+                    }
                 });
             });
         });
@@ -616,6 +735,151 @@ class Database {
                 reject(error);
             }
         });
+    }
+
+    // Personality management methods
+    async getPersonalities() {
+        return new Promise((resolve, reject) => {
+            this.db.all('SELECT * FROM personalities ORDER BY created_at DESC', [], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            });
+        });
+    }
+
+    async addPersonality({ name, system_prompt }) {
+        return new Promise((resolve, reject) => {
+            const db = this.db;
+            this.db.serialize(() => {
+                const stmt = this.db.prepare(
+                    `INSERT INTO personalities (name, system_prompt) VALUES (?, ?)`
+                );
+
+                stmt.run([name, system_prompt], function(err) {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
+
+                    const id = this.lastID;
+                    db.get(
+                        'SELECT * FROM personalities WHERE id = ?',
+                        [id],
+                        (err, row) => {
+                            if (err) reject(err);
+                            else resolve(row);
+                        }
+                    );
+                });
+            });
+        });
+    }
+
+    async setDefaultPersonality(id) {
+        return new Promise((resolve, reject) => {
+            this.db.serialize(() => {
+                // First, unset any existing default
+                this.db.run('UPDATE personalities SET is_default = 0', [], (err) => {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
+
+                    // Then set the new default
+                    this.db.run(
+                        'UPDATE personalities SET is_default = 1 WHERE id = ?',
+                        [id],
+                        (err) => {
+                            if (err) {
+                                reject(err);
+                                return;
+                            }
+
+                            // Return the updated personality
+                            this.db.get(
+                                'SELECT * FROM personalities WHERE id = ?',
+                                [id],
+                                (err, row) => {
+                                    if (err) {
+                                        reject(err);
+                                    } else if (!row) {
+                                        reject(new Error('Personality not found'));
+                                    } else {
+                                        resolve(row);
+                                    }
+                                }
+                            );
+                        }
+                    );
+                });
+            });
+        });
+    }
+
+    async deletePersonality(id) {
+        return new Promise((resolve, reject) => {
+            // Don't allow deletion of builtin personalities
+            this.db.run(
+                'DELETE FROM personalities WHERE id = ? AND is_builtin = 0',
+                [id],
+                function(err) {
+                    if (err) reject(err);
+                    else resolve(this.changes > 0);
+                }
+            );
+        });
+    }
+
+    async getDefaultPersonality() {
+        return new Promise((resolve, reject) => {
+            this.db.get('SELECT * FROM personalities WHERE is_default = 1', [], (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            });
+        });
+    }
+
+    // Tool configuration methods
+    async getToolConfigs() {
+        const rows = await this.all('SELECT * FROM tool_configs');
+        const configs = {};
+        rows.forEach(row => {
+            if (!configs[row.tool_name]) {
+                configs[row.tool_name] = {
+                    is_enabled: row.is_enabled
+                };
+            }
+            configs[row.tool_name][row.config_key] = row.config_value;
+        });
+        return configs;
+    }
+
+    async updateToolConfig(toolName, configKey, configValue) {
+        const query = `
+            INSERT INTO tool_configs (tool_name, config_key, config_value, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(tool_name, config_key)
+            DO UPDATE SET 
+                config_value = excluded.config_value,
+                updated_at = excluded.updated_at
+        `;
+        return this.run(query, [toolName, configKey, configValue]);
+    }
+
+    async setToolEnabled(toolName, isEnabled) {
+        const query = `
+            UPDATE tool_configs 
+            SET is_enabled = ?, updated_at = datetime('now')
+            WHERE tool_name = ?
+        `;
+        return this.run(query, [isEnabled ? 1 : 0, toolName]);
+    }
+
+    async deleteToolConfig(toolName, configKey) {
+        return this.run(
+            'DELETE FROM tool_configs WHERE tool_name = ? AND config_key = ?',
+            [toolName, configKey]
+        );
     }
 }
 

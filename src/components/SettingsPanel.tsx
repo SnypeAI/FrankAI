@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Wand2, Volume2, Settings2, CheckCircle2, XCircle, Star } from 'lucide-react';
+import { X, Wand2, Volume2, Settings2, CheckCircle2, XCircle, Star, UserCircle2, Plus, Wrench, Cloud, Search } from 'lucide-react';
 import { motion } from 'framer-motion';
 import ConfirmationModal from './ConfirmationModal';
 
@@ -26,6 +26,15 @@ interface SavedConfig {
   created_at: string;
 }
 
+interface Personality {
+  id: number;
+  name: string;
+  system_prompt: string;
+  is_default: boolean;
+  is_builtin: boolean;
+  created_at: string;
+}
+
 interface LLMModel {
   id: string;
   name?: string;
@@ -41,6 +50,13 @@ interface ModelFilters {
   sizeRange: string;
   sortBy: 'name' | 'size';
   sortDirection: 'asc' | 'desc';
+}
+
+interface ToolConfig {
+  tool_name: string;
+  config_key: string;
+  config_value: string | null;
+  is_enabled: boolean;
 }
 
 interface SettingsPanelProps {
@@ -59,6 +75,9 @@ interface SettingsPanelProps {
   onDeleteConfig: (id: number) => Promise<void>;
   onUpdateConfig: (id: number, config: Partial<SavedConfig>) => Promise<void>;
   onSetDefaultConfig: (id: number) => Promise<void>;
+  toolConfigs: Record<string, any>;
+  onUpdateToolConfig: (toolName: string, configKey: string, configValue: string) => Promise<void>;
+  onSetToolEnabled: (toolName: string, isEnabled: boolean) => Promise<void>;
 }
 
 const SaveConfigForm = ({ onSave, isSaving, isTesting }: { 
@@ -185,6 +204,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onDeleteConfig,
   onUpdateConfig,
   onSetDefaultConfig,
+  toolConfigs = {},
+  onUpdateToolConfig,
+  onSetToolEnabled,
 }) => {
   const [activeTab, setActiveTab] = useState('llm');
   const [formInputs, setFormInputs] = useState({
@@ -201,6 +223,11 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [settingToRemove, setSettingToRemove] = useState<string | null>(null);
   const [configToDelete, setConfigToDelete] = useState<SavedConfig | null>(null);
   const [selectedConfig, setSelectedConfig] = useState<SavedConfig | null>(null);
+  const [personalities, setPersonalities] = useState<Personality[]>([]);
+  const [newPersonality, setNewPersonality] = useState({ name: '', system_prompt: '' });
+  const [isAddingPersonality, setIsAddingPersonality] = useState(false);
+  const [personalityToDelete, setPersonalityToDelete] = useState<Personality | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
 
   const [filters, setFilters] = useState<ModelFilters>({
     showUncensored: false,
@@ -221,6 +248,80 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
       elevenlabs_voice_id: settings.elevenlabs_voice_id || ''
     });
   }, [settings]);
+
+  useEffect(() => {
+    // Initialize WebSocket connection when panel opens
+    if (isOpen) {
+      wsRef.current = new WebSocket('ws://localhost:3000');
+      wsRef.current.onmessage = handleWebSocketMessage;
+      wsRef.current.onopen = () => {
+        // Fetch personalities when connection is established
+        wsRef.current?.send(JSON.stringify({ type: 'get_personalities' }));
+      };
+    }
+
+    // Cleanup WebSocket connection when panel closes
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [isOpen]);
+
+  const handleWebSocketMessage = (event: MessageEvent) => {
+    const data = JSON.parse(event.data);
+    switch (data.type) {
+      case 'personalities':
+        setPersonalities(data.personalities);
+        break;
+      case 'personality_added':
+        setPersonalities(prev => [data.personality, ...prev]);
+        setNewPersonality({ name: '', system_prompt: '' });
+        setIsAddingPersonality(false);
+        break;
+      case 'personality_default_set':
+        setPersonalities(prev => prev.map(p => ({
+          ...p,
+          is_default: p.id === data.personality.id
+        })));
+        break;
+      case 'personality_deleted':
+        if (data.success) {
+          setPersonalities(prev => prev.filter(p => p.id !== data.id));
+          setPersonalityToDelete(null);
+        }
+        break;
+    }
+  };
+
+  const handleAddPersonality = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'add_personality',
+        name: newPersonality.name,
+        system_prompt: newPersonality.system_prompt
+      }));
+    }
+  };
+
+  const handleSetDefaultPersonality = (id: number) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'set_default_personality',
+        id
+      }));
+    }
+  };
+
+  const handleDeletePersonality = (id: number) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'delete_personality',
+        id
+      }));
+    }
+  };
 
   // Helper functions
   const getChipColor = (key: string) => {
@@ -313,6 +414,8 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const tabs = [
     { id: 'llm', label: 'LLM', icon: Wand2 },
     { id: 'voice', label: 'Voice', icon: Volume2 },
+    { id: 'tools', label: 'Tools', icon: Wrench },
+    { id: 'personalities', label: 'Personalities', icon: UserCircle2 },
     { id: 'system', label: 'System', icon: Settings2 }
   ];
 
@@ -769,16 +872,211 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             </div>
           )}
 
+          {activeTab === 'tools' && (
+            <div className="space-y-6">
+              {/* Weather Tool Settings */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <Cloud className="w-5 h-5 text-blue-400" />
+                    <h3 className="text-lg font-medium text-white">Weather Tool</h3>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={toolConfigs?.weather?.is_enabled || false}
+                      onChange={(e) => onSetToolEnabled('weather', e.target.checked)}
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+                  </label>
+                </div>
+                <div>
+                  <label className="block text-sm text-white/70 mb-1">OpenWeather API Key</label>
+                  <input
+                    type="password"
+                    value={toolConfigs?.weather?.openweather_api_key || ''}
+                    onChange={(e) => onUpdateToolConfig('weather', 'openweather_api_key', e.target.value)}
+                    className="w-full p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
+                    placeholder="Enter OpenWeather API key"
+                  />
+                </div>
+              </div>
+
+              {/* Google Search Tool Settings */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <Search className="w-5 h-5 text-green-400" />
+                    <h3 className="text-lg font-medium text-white">Google Search Tool</h3>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={toolConfigs?.google_search?.is_enabled || false}
+                      onChange={(e) => onSetToolEnabled('google_search', e.target.checked)}
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+                  </label>
+                </div>
+                <div>
+                  <label className="block text-sm text-white/70 mb-1">Google API Key</label>
+                  <input
+                    type="password"
+                    value={toolConfigs?.google_search?.api_key || ''}
+                    onChange={(e) => onUpdateToolConfig('google_search', 'api_key', e.target.value)}
+                    className="w-full p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
+                    placeholder="Enter Google API key"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-white/70 mb-1">Search Engine ID</label>
+                  <input
+                    type="text"
+                    value={toolConfigs?.google_search?.search_engine_id || ''}
+                    onChange={(e) => onUpdateToolConfig('google_search', 'search_engine_id', e.target.value)}
+                    className="w-full p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
+                    placeholder="Enter Google Search Engine ID"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'personalities' && (
+            <div className="space-y-6">
+              <div className="flex justify-between items-center">
+                <h3 className="text-lg font-medium text-white">Personalities</h3>
+                <button
+                  onClick={() => setIsAddingPersonality(true)}
+                  className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add Personality</span>
+                </button>
+              </div>
+
+              {isAddingPersonality && (
+                <div className="space-y-4 p-4 bg-white/5 rounded-lg">
+                  <div>
+                    <label className="block text-sm text-white/70 mb-1">Name</label>
+                    <input
+                      type="text"
+                      value={newPersonality.name}
+                      onChange={(e) => setNewPersonality(prev => ({ ...prev, name: e.target.value }))}
+                      className="w-full p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm"
+                      placeholder="Enter personality name"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-white/70 mb-1">System Prompt</label>
+                    <textarea
+                      value={newPersonality.system_prompt}
+                      onChange={(e) => setNewPersonality(prev => ({ ...prev, system_prompt: e.target.value }))}
+                      className="w-full h-32 p-2 bg-black/20 border border-white/10 rounded-lg text-white/90 text-sm resize-none"
+                      placeholder="Enter system prompt"
+                    />
+                  </div>
+                  <div className="flex justify-end space-x-2">
+                    <button
+                      onClick={() => setIsAddingPersonality(false)}
+                      className="px-4 py-2 rounded-lg text-white/50 hover:text-white/70 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleAddPersonality}
+                      disabled={!newPersonality.name || !newPersonality.system_prompt}
+                      className={`px-4 py-2 rounded-lg transition-colors ${
+                        !newPersonality.name || !newPersonality.system_prompt
+                          ? 'bg-white/5 text-white/30 cursor-not-allowed'
+                          : 'bg-blue-600/20 hover:bg-blue-600/30 text-blue-400'
+                      }`}
+                    >
+                      Add
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {personalities.map((personality) => (
+                  <motion.div
+                    key={personality.id}
+                    className="p-4 bg-white/5 rounded-lg hover:bg-white/10 transition-all group"
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-sm font-medium text-white/90">{personality.name}</h4>
+                        {personality.is_builtin && (
+                          <span className="px-2 py-1 text-xs rounded-full bg-purple-500/20 text-purple-400">
+                            Built-in
+                          </span>
+                        )}
+                        <button
+                          onClick={() => handleSetDefaultPersonality(personality.id)}
+                          className={`transition-opacity ${personality.is_default ? 'text-green-500' : 'text-white/30 hover:text-green-500/70'}`}
+                        >
+                          <CheckCircle2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                      {!personality.is_builtin && (
+                        <button
+                          onClick={() => setPersonalityToDelete(personality)}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <X className="w-4 h-4 text-red-400" />
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-sm text-white/50">{personality.system_prompt}</p>
+                  </motion.div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {activeTab === 'system' && (
             <div className="space-y-6">
-              {/* System Settings */}
               <div className="space-y-4">
-                <p className="text-sm text-white/50">System settings coming soon...</p>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <Volume2 className="w-5 h-5 text-purple-400" />
+                    <h3 className="text-lg font-medium text-white">ElevenLabs Integration</h3>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={toolConfigs.elevenlabs_tts?.is_enabled || false}
+                      onChange={(e) => onSetToolEnabled('elevenlabs_tts', e.target.checked)}
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+                  </label>
+                </div>
+                <p className="text-sm text-white/50">Enable or disable ElevenLabs text-to-speech for AI responses</p>
               </div>
             </div>
           )}
         </div>
       </div>
+
+      {/* Confirmation Modal for Deleting Personality */}
+      <ConfirmationModal
+        isOpen={personalityToDelete !== null}
+        onClose={() => setPersonalityToDelete(null)}
+        onConfirm={() => {
+          if (personalityToDelete) {
+            handleDeletePersonality(personalityToDelete.id);
+          }
+        }}
+        title="Delete Personality"
+        message={`Are you sure you want to delete "${personalityToDelete?.name}"? This action cannot be undone.`}
+        confirmText="Delete"
+        cancelText="Cancel"
+        isDanger={true}
+      />
     </>
   );
 

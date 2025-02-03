@@ -8,8 +8,16 @@ const __dirname = path.dirname(__filename);
 
 class Database {
     constructor() {
-        this.db = new sqlite3.Database(path.join(__dirname, 'Frank.db'));
-        this.init();
+        this.db = new sqlite3.Database(path.join(__dirname, 'Frank.db'), (err) => {
+            if (err) {
+                console.error('Error opening database:', err);
+                throw err;
+            }
+            console.log('Connected to Frank database');
+            this.init().catch(err => {
+                console.error('Error initializing database:', err);
+            });
+        });
         // Mix in tool configuration methods
         Object.assign(this, toolConfigMethods);
     }
@@ -17,173 +25,171 @@ class Database {
     async init() {
         return new Promise((resolve, reject) => {
             this.db.serialize(() => {
-                // Drop and recreate conversations table with summary column
-                this.db.run(`DROP TABLE IF EXISTS conversations`);
-                this.db.run(`
-                    CREATE TABLE conversations (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        title TEXT,
-                        summary TEXT,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                `);
+                try {
+                    // Create conversations table
+                    this.db.run(`
+                        CREATE TABLE IF NOT EXISTS conversations (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            title TEXT,
+                            summary TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                    `);
 
-                // Drop and recreate messages table with role instead of is_ai
-                this.db.run(`DROP TABLE IF EXISTS messages`);
-                this.db.run(`
-                    CREATE TABLE messages (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        conversation_id INTEGER,
-                        content TEXT,
-                        role TEXT,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-                    )
-                `);
+                    // Create messages table
+                    this.db.run(`
+                        CREATE TABLE IF NOT EXISTS messages (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            conversation_id INTEGER,
+                            content TEXT,
+                            role TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                        )
+                    `);
 
-                // Create settings table
-                this.db.run(`
-                    CREATE TABLE IF NOT EXISTS settings (
-                        key TEXT PRIMARY KEY,
-                        value TEXT
-                    )
-                `);
+                    // Create settings table
+                    this.db.run(`
+                        CREATE TABLE IF NOT EXISTS settings (
+                            key TEXT PRIMARY KEY,
+                            value TEXT
+                        )
+                    `);
 
-                // Create tool_configs table
-                this.db.run(`
-                    CREATE TABLE IF NOT EXISTS tool_configs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        tool_name TEXT NOT NULL,
-                        config_key TEXT NOT NULL,
-                        config_value TEXT,
-                        is_enabled BOOLEAN DEFAULT 1,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(tool_name, config_key)
-                    )
-                `, (err) => {
-                    if (err) reject(err);
-                    else resolve();
-                });
+                    // Create tool_configs table
+                    this.db.run(`
+                        CREATE TABLE IF NOT EXISTS tool_configs (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            tool_name TEXT NOT NULL,
+                            config_key TEXT NOT NULL,
+                            config_value TEXT,
+                            is_enabled BOOLEAN DEFAULT 1,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(tool_name, config_key)
+                        )
+                    `);
 
-                // Create saved_configs table if it doesn't exist
-                this.db.run(`
-                    CREATE TABLE IF NOT EXISTS saved_configs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT NOT NULL,
-                        endpoint TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        temperature TEXT NOT NULL,
-                        max_tokens TEXT NOT NULL,
-                        elevenlabs_api_key TEXT,
-                        elevenlabs_voice_id TEXT,
-                        is_default BOOLEAN DEFAULT 0,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                `, (err) => {
-                    if (err) reject(err);
-                    else {
-                        // Create personalities table
-                        this.db.run(`
-                            CREATE TABLE IF NOT EXISTS personalities (
-                                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                name TEXT NOT NULL UNIQUE,
-                                system_prompt TEXT NOT NULL,
-                                is_default BOOLEAN DEFAULT 0,
-                                is_builtin BOOLEAN DEFAULT 0,
-                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                            )
-                        `, async (err) => {
-                            if (err) {
-                                console.error('Error creating personalities table:', err);
-                                reject(err);
-                            } else {
-                                try {
-                                    // Insert default personalities if they don't exist
-                                    const defaultPersonalities = [
-                                        {
-                                            name: 'Normal',
-                                            system_prompt: 'You are a helpful AI assistant.',
-                                            is_builtin: 1,
-                                            is_default: 1
-                                        },
-                                        {
-                                            name: 'Concise',
-                                            system_prompt: 'You are a helpful AI assistant. Be concise and to the point.',
-                                            is_builtin: 1
-                                        },
-                                        {
-                                            name: 'Formal',
-                                            system_prompt: 'You are a helpful AI assistant. Maintain a formal and professional tone.',
-                                            is_builtin: 1
-                                        },
-                                        {
-                                            name: 'Sassy',
-                                            system_prompt: 'You are a helpful but sassy AI assistant with attitude.',
-                                            is_builtin: 1
-                                        },
-                                        {
-                                            name: 'Pirate',
-                                            system_prompt: 'You are a helpful AI assistant who speaks like a pirate. Use pirate slang and terminology.',
-                                            is_builtin: 1
-                                        }
-                                    ];
+                    // Create saved_configs table
+                    this.db.run(`
+                        CREATE TABLE IF NOT EXISTS saved_configs (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            name TEXT NOT NULL,
+                            endpoint TEXT NOT NULL,
+                            model TEXT NOT NULL,
+                            temperature TEXT NOT NULL,
+                            max_tokens TEXT NOT NULL,
+                            elevenlabs_api_key TEXT,
+                            elevenlabs_voice_id TEXT,
+                            is_default BOOLEAN DEFAULT 0,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                    `);
 
-                                    await new Promise((resolve, reject) => {
-                                        this.db.run('BEGIN TRANSACTION', async (err) => {
-                                            if (err) {
-                                                console.error('Error starting transaction:', err);
-                                                reject(err);
-                                                return;
-                                            }
+                    // Create personalities table
+                    this.db.run(`
+                        CREATE TABLE IF NOT EXISTS personalities (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            name TEXT NOT NULL UNIQUE,
+                            system_prompt TEXT NOT NULL,
+                            is_default BOOLEAN DEFAULT 0,
+                            is_builtin BOOLEAN DEFAULT 0,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        )
+                    `);
 
-                                            try {
-                                                for (const personality of defaultPersonalities) {
-                                                    await new Promise((res, rej) => {
-                                                        this.db.run(
-                                                            `INSERT INTO personalities (name, system_prompt, is_builtin, is_default) 
-                                                             VALUES (?, ?, ?, ?)
-                                                             ON CONFLICT(name) DO UPDATE SET
-                                                             system_prompt = excluded.system_prompt,
-                                                             is_builtin = excluded.is_builtin,
-                                                             is_default = excluded.is_default
-                                                             WHERE is_builtin = 1`,
-                                                            [personality.name, personality.system_prompt, personality.is_builtin, personality.is_default || 0],
-                                                            (err) => {
-                                                                if (err) rej(err);
-                                                                else res();
-                                                            }
-                                                        );
-                                                    });
-                                                }
+                    // Initialize default tool configurations
+                    const defaultTools = [
+                        {
+                            name: 'weather',
+                            configs: {
+                                is_enabled: true,
+                                api_key: ''
+                            }
+                        },
+                        {
+                            name: 'google_search',
+                            configs: {
+                                is_enabled: true,
+                                api_key: ''
+                            }
+                        },
+                        {
+                            name: 'elevenlabs_tts',
+                            configs: {
+                                is_enabled: true,
+                                api_key: '',
+                                voice_id: ''
+                            }
+                        }
+                    ];
 
-                                                this.db.run('COMMIT', (err) => {
-                                                    if (err) {
-                                                        console.error('Error committing transaction:', err);
-                                                        reject(err);
-                                                    } else {
-                                                        resolve();
-                                                    }
-                                                });
-                                            } catch (error) {
-                                                this.db.run('ROLLBACK', () => {
-                                                    console.error('Transaction rolled back:', error);
-                                                    reject(error);
-                                                });
-                                            }
-                                        });
-                                    });
+                    // Insert default tool configurations
+                    defaultTools.forEach(tool => {
+                        // Set the enabled state
+                        this.db.run(
+                            `INSERT OR REPLACE INTO tool_configs (tool_name, config_key, config_value, is_enabled)
+                             VALUES (?, 'is_enabled', ?, 1)`,
+                            [tool.name, tool.configs.is_enabled.toString()]
+                        );
 
-                                    resolve();
-                                } catch (error) {
-                                    console.error('Error in personalities initialization:', error);
-                                    reject(error);
-                                }
+                        // Set other configurations
+                        Object.entries(tool.configs).forEach(([key, value]) => {
+                            if (key !== 'is_enabled') {
+                                this.db.run(
+                                    `INSERT OR REPLACE INTO tool_configs (tool_name, config_key, config_value)
+                                     VALUES (?, ?, ?)`,
+                                    [tool.name, key, value.toString()]
+                                );
                             }
                         });
-                    }
-                });
+                    });
+
+                    // Initialize default personalities
+                    const defaultPersonalities = [
+                        {
+                            name: 'Normal',
+                            system_prompt: 'You are a helpful AI assistant.',
+                            is_builtin: 1,
+                            is_default: 1
+                        },
+                        {
+                            name: 'Concise',
+                            system_prompt: 'You are a helpful AI assistant. Be concise and to the point.',
+                            is_builtin: 1
+                        },
+                        {
+                            name: 'Formal',
+                            system_prompt: 'You are a helpful AI assistant. Maintain a formal and professional tone.',
+                            is_builtin: 1
+                        },
+                        {
+                            name: 'Sassy',
+                            system_prompt: 'You are a helpful but sassy AI assistant with attitude.',
+                            is_builtin: 1
+                        },
+                        {
+                            name: 'Pirate',
+                            system_prompt: 'You are a helpful AI assistant who speaks like a pirate. Use pirate slang and terminology.',
+                            is_builtin: 1
+                        }
+                    ];
+
+                    // Insert default personalities
+                    defaultPersonalities.forEach(personality => {
+                        this.db.run(
+                            `INSERT OR REPLACE INTO personalities (name, system_prompt, is_builtin, is_default)
+                             VALUES (?, ?, ?, ?)`,
+                            [personality.name, personality.system_prompt, personality.is_builtin, personality.is_default || 0]
+                        );
+                    });
+
+                    resolve();
+                } catch (error) {
+                    console.error('Error in database initialization:', error);
+                    reject(error);
+                }
             });
         });
     }
@@ -569,48 +575,47 @@ class Database {
     async setDefaultConfig(id) {
         return new Promise((resolve, reject) => {
             console.log('Setting default config for id:', id);
-            this.db.serialize(() => {
-                // First, unset any existing default
-                this.db.run('UPDATE saved_configs SET is_default = 0', [], (err) => {
-                    if (err) {
-                        console.error('Error unsetting previous default:', err);
-                        reject(err);
-                        return;
-                    }
+            this.db.serialize(async () => {
+                try {
+                    // Begin transaction
+                    await this.run('BEGIN TRANSACTION');
+
+                    // First, unset any existing default
+                    await this.run('UPDATE saved_configs SET is_default = 0');
                     console.log('Unset previous default configs');
 
                     // Then set the new default
-                    this.db.run(
-                        'UPDATE saved_configs SET is_default = 1 WHERE id = ?',
-                        [id],
-                        (err) => {
-                            if (err) {
-                                console.error('Error setting new default:', err);
-                                reject(err);
-                                return;
-                            }
-                            console.log('Set new default config');
+                    await this.run('UPDATE saved_configs SET is_default = 1 WHERE id = ?', [id]);
+                    console.log('Set new default config');
 
-                            // Return the updated config
-                            this.db.get(
-                                'SELECT * FROM saved_configs WHERE id = ?',
-                                [id],
-                                (err, row) => {
-                                    if (err) {
-                                        console.error('Error fetching updated config:', err);
-                                        reject(err);
-                                    } else if (!row) {
-                                        console.error('Config not found after setting default');
-                                        reject(new Error('Config not found'));
-                                    } else {
-                                        console.log('Successfully set default config:', row);
-                                        resolve(row);
-                                    }
-                                }
-                            );
-                        }
-                    );
-                });
+                    // Get the updated config
+                    const config = await this.get('SELECT * FROM saved_configs WHERE id = ?', [id]);
+                    if (!config) {
+                        throw new Error('Config not found');
+                    }
+
+                    // Update settings with the new default config
+                    await this.updateSetting('llm_api_endpoint', config.endpoint);
+                    await this.updateSetting('llm_model', config.model);
+                    await this.updateSetting('llm_temperature', config.temperature);
+                    await this.updateSetting('llm_max_tokens', config.max_tokens);
+                    if (config.elevenlabs_api_key) {
+                        await this.updateSetting('elevenlabs_api_key', config.elevenlabs_api_key);
+                    }
+                    if (config.elevenlabs_voice_id) {
+                        await this.updateSetting('elevenlabs_voice_id', config.elevenlabs_voice_id);
+                    }
+
+                    // Commit transaction
+                    await this.run('COMMIT');
+                    console.log('Successfully set default config:', config);
+                    resolve(config);
+                } catch (error) {
+                    // Rollback on error
+                    await this.run('ROLLBACK');
+                    console.error('Error in setDefaultConfig:', error);
+                    reject(error);
+                }
             });
         });
     }
@@ -713,20 +718,39 @@ class Database {
     async getDefaultConfig() {
         return new Promise(async (resolve, reject) => {
             try {
+                // Get the default config
                 const defaultConfig = await this.get('SELECT * FROM saved_configs WHERE is_default = 1');
                 
                 if (defaultConfig) {
-                    // Update settings with the default config values
-                    await this.updateSetting('llm_api_endpoint', defaultConfig.endpoint);
-                    await this.updateSetting('llm_model', defaultConfig.model);
-                    await this.updateSetting('llm_temperature', defaultConfig.temperature);
-                    await this.updateSetting('llm_max_tokens', defaultConfig.max_tokens);
-                    if (defaultConfig.elevenlabs_api_key) {
-                        await this.updateSetting('elevenlabs_api_key', defaultConfig.elevenlabs_api_key);
+                    console.log('Found default config:', defaultConfig);
+                    
+                    // Begin a transaction for atomic updates
+                    await this.run('BEGIN TRANSACTION');
+                    
+                    try {
+                        // Update all the settings
+                        await this.updateSetting('llm_api_endpoint', defaultConfig.endpoint);
+                        await this.updateSetting('llm_model', defaultConfig.model);
+                        await this.updateSetting('llm_temperature', defaultConfig.temperature);
+                        await this.updateSetting('llm_max_tokens', defaultConfig.max_tokens);
+                        if (defaultConfig.elevenlabs_api_key) {
+                            await this.updateSetting('elevenlabs_api_key', defaultConfig.elevenlabs_api_key);
+                        }
+                        if (defaultConfig.elevenlabs_voice_id) {
+                            await this.updateSetting('elevenlabs_voice_id', defaultConfig.elevenlabs_voice_id);
+                        }
+                        
+                        // Commit the transaction
+                        await this.run('COMMIT');
+                        console.log('Successfully updated settings with default config');
+                    } catch (error) {
+                        // Rollback on error
+                        await this.run('ROLLBACK');
+                        console.error('Error updating settings with default config:', error);
+                        throw error;
                     }
-                    if (defaultConfig.elevenlabs_voice_id) {
-                        await this.updateSetting('elevenlabs_voice_id', defaultConfig.elevenlabs_voice_id);
-                    }
+                } else {
+                    console.log('No default config found');
                 }
                 
                 resolve(defaultConfig);
